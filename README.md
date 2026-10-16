@@ -12,26 +12,28 @@
 
 ## 1. 初始化 MySQL
 
-使用 MySQL 8.0.13 或更高版本，运行 错题本-后端/database/schema.sql。脚本会创建 wrongbook 数据库、业务表和语文、数学、英语等默认学科。
+首次建库使用 MySQL 8.0.13 或更高版本，运行 `database/schema.sql`。脚本会创建 wrongbook 数据库、业务表和默认学科。
 
-数据库脚本由项目成员手动运行。后端不会自动创建或改动数据库结构。
+已经运行过旧版 schema 的数据库，运行 `database/upgrade-wechat-avatar.sql` 增加头像字段。该脚本可以重复执行，已存在的头像字段会自动跳过。数据库脚本由项目成员手动运行，后端不会自动创建或改动数据库结构。
 
 ## 2. 在 IDEA 启动后端
 
 1. 在 IDEA 中打开 错题本-后端 文件夹，作为 Maven 项目导入。
 2. 打开 src/main/resources/application.yml，将用户名和密码改成电脑本机 MySQL 的配置；也可以在 IDEA 的运行配置中设置环境变量 DB_USERNAME 和 DB_PASSWORD。
-3. 运行 com.xuotiben.WrongbookApplication。
+3. 运行 com.cuotiben.WrongbookApplication。
 4. 后端监听 0.0.0.0:8080，浏览器打开 http://127.0.0.1:8080/api/v1/health 应看到 {"status":"UP","service":"wrongbook-api"}。
 
-IDEA 运行配置可使用以下环境变量：
+在 IDEA 的“运行/调试配置 → 环境变量”中设置：
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | DB_URL | jdbc:mysql://127.0.0.1:3306/wrongbook?... | 本机 MySQL 连接地址 |
-| DB_USERNAME | root | MySQL 用户名 |
-| DB_PASSWORD | root | MySQL 密码 |
+| DB_USERNAME | epiphany | MySQL 用户名 |
+| DB_PASSWORD | 123456 | MySQL 密码 |
 | DEV_AUTH_ENABLED | true | 开启本地开发登录 |
-| APP_STORAGE_LOCATION | ./data/uploads | 错题照片保存目录 |
+| APP_STORAGE_LOCATION | 项目约定的本机 uploads 目录 | 错题照片和头像保存目录 |
+
+当前使用本地开发登录，不需要配置微信 AppSecret。
 
 ## 3. 配置手机热点联调
 
@@ -39,15 +41,17 @@ IDEA 运行配置可使用以下环境变量：
 
 1. 在电脑终端运行 ipconfig getifaddr en0，查看电脑在热点下的 IPv4 地址。若命令没有输出，可用 networksetup -listallhardwareports 找到 Wi-Fi 对应接口，再运行 ipconfig getifaddr <接口名>。
 2. 将该地址填入 错题本-微信小程序前端/utils/config.js，例如 http://172.20.10.2:8080/api/v1。不要写 localhost 或 127.0.0.1。
-3. 在微信开发者工具中导入 错题本-微信小程序前端。project.config.json 使用 touristappid 便于本地编译；需要真机预览时，替换成团队的小程序 AppID。
+3. `project.config.json` 使用项目当前的小程序 AppID。在 `utils/config.js` 中填入电脑当前热点 IP。
 4. 在开发者工具“详情 → 本地设置”打开“不校验合法域名、web-view、TLS 版本以及 HTTPS 证书”，编译后真机预览。
 5. 确认 IDEA 后端仍在运行。如果 macOS 防火墙询问是否允许 Java 接受传入连接，请允许本地网络访问。
+
+扫码后小程序会自动使用本地开发身份进入，不需要微信授权弹窗或 AppSecret。头像通过“我的 → 更换头像”由用户主动选择，昵称可在档案页编辑。
 
 如果手机无法访问电脑地址，先确认两台设备仍在同一热点下，并在电脑终端用 curl http://127.0.0.1:8080/api/v1/health 检查后端，再检查 macOS 防火墙的 8080 端口访问。
 
 ## 4. 首版功能
 
-- 本地开发登录、学习档案和测试账号切换
+- 本地开发登录、学习档案、头像上传和测试账号切换
 - 错题手动录入、拍照/相册上传、编辑、搜索、分类、个人标签、归档和回收站接口
 - 用户可新增个人章节和知识点；错题可按学科、章节、错因、日期、状态和到期情况筛选
 - 复习结果、信心/耗时字段、版本化的 1/3/7/14 天复习间隔
@@ -71,4 +75,4 @@ API 前缀为 /api/v1。主要路由：
 - POST /questions/{id}/attachments、GET /attachments/{id}：图片
 - POST /feedback：意见反馈
 
-正式微信登录、OCR、订阅提醒、家庭和班级关系、PDF 导出属于后续阶段。当前 DEV_AUTH_ENABLED=true 只用于本地联调，不要把开发后端暴露到公网。
+OCR、订阅提醒、家庭和班级关系、PDF 导出属于后续阶段。当前 DEV_AUTH_ENABLED=true 只用于本地联调，不要把开发后端暴露到公网。
