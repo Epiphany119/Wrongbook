@@ -17,26 +17,28 @@ public class DashboardService {
     public Map<String, Object> overview(String userId, int days) {
         int due = number("""
                 SELECT COUNT(*) FROM question_records
-                WHERE owner_id=? AND deleted_at IS NULL AND mastery_state <> 'ARCHIVED'
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL AND mastery_state <> 'ARCHIVED'
                   AND next_review_at <= NOW(3)
                 """, userId);
         int overdue = number("""
                 SELECT COUNT(*) FROM question_records
-                WHERE owner_id=? AND deleted_at IS NULL AND mastery_state <> 'ARCHIVED'
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL AND mastery_state <> 'ARCHIVED'
                   AND next_review_at < CURDATE()
                 """, userId);
         int total = number("""
-                SELECT COUNT(*) FROM review_events WHERE owner_id=? AND occurred_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
+                SELECT COUNT(*) FROM review_events r JOIN question_records q ON q.id=r.question_id
+                WHERE r.owner_id=? AND q.subject_id='history' AND r.occurred_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
                 """, userId, days);
         int correct = number("""
-                SELECT COUNT(*) FROM review_events
-                WHERE owner_id=? AND result='CORRECT' AND occurred_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
+                SELECT COUNT(*) FROM review_events r JOIN question_records q ON q.id=r.question_id
+                WHERE r.owner_id=? AND q.subject_id='history' AND r.result='CORRECT'
+                  AND r.occurred_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
                 """, userId, days);
         int repeated = number("""
                 SELECT COUNT(*) FROM (
-                    SELECT question_id FROM review_events
-                    WHERE owner_id=? AND result IN ('INCORRECT','UNCERTAIN')
-                    GROUP BY question_id HAVING COUNT(*) >= 2
+                    SELECT r.question_id FROM review_events r JOIN question_records q ON q.id=r.question_id
+                    WHERE r.owner_id=? AND q.subject_id='history' AND r.result IN ('INCORRECT','UNCERTAIN')
+                    GROUP BY r.question_id HAVING COUNT(*) >= 2
                 ) repeated_questions
                 """, userId);
         Double accuracy = total == 0 ? null : Math.round(correct * 1000.0 / total) / 10.0;
@@ -48,13 +50,26 @@ public class DashboardService {
         result.put("accuracyPercent", accuracy);
         result.put("repeatedErrorCount", repeated);
         result.put("rangeDays", days);
+        result.put("recentQuestions", jdbc.queryForList("""
+                SELECT q.id, q.question_text AS questionText, s.name AS subjectName,
+                       c.name AS chapterName,
+                       (SELECT COUNT(*) FROM review_events r WHERE r.question_id=q.id AND r.owner_id=q.owner_id) AS reviewCount,
+                       q.mastery_state AS masteryState
+                FROM question_records q
+                LEFT JOIN subjects s ON s.id=q.subject_id
+                LEFT JOIN chapters c ON c.id=q.chapter_id
+                WHERE q.owner_id=? AND q.subject_id='history' AND q.deleted_at IS NULL AND q.mastery_state <> 'ARCHIVED'
+                ORDER BY q.created_at DESC, q.id DESC
+                LIMIT 3
+                """, userId));
         result.put("subjectTrends", jdbc.queryForList("""
                 SELECT s.id AS subjectId, s.name AS subjectName, COUNT(r.id) AS sampleCount,
                        SUM(CASE WHEN r.result='CORRECT' THEN 1 ELSE 0 END) AS correctCount
                 FROM review_events r
                 JOIN question_records q ON q.id=r.question_id
                 LEFT JOIN subjects s ON s.id=q.subject_id
-                WHERE r.owner_id=? AND r.occurred_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
+                WHERE r.owner_id=? AND q.subject_id='history'
+                  AND r.occurred_at >= DATE_SUB(NOW(3), INTERVAL ? DAY)
                 GROUP BY s.id, s.name ORDER BY sampleCount DESC
                 """, userId, days).stream().map(row -> {
             Map<String, Object> trend = new LinkedHashMap<>(row);
