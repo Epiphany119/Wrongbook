@@ -23,7 +23,7 @@
 3. 运行 com.cuotiben.WrongbookApplication。
 4. 后端监听 0.0.0.0:8080，浏览器打开 http://127.0.0.1:8080/api/v1/health 应看到 {"status":"UP","service":"wrongbook-api"}。
 
-本地默认启用 `local` 配置。图片识题使用智谱 GLM-4.6V-Flash 多模态模型；API Key 填写到 `src/main/resources/application-local.yml` 的 `app.glm-vision.api-key`。该文件已加入 `.gitignore`，不会提交到 Git。若本机没有该文件，可复制 `application-local.example.yml` 并命名为 `application-local.yml`。密钥不需要配置到小程序。
+本地默认启用 `local` 配置。图片识题使用 DeepSeek Flash 多模态模型；API Key 填写到 `src/main/resources/application-local.yml` 的 `app.deepseek-vision.api-key`。该文件已加入 `.gitignore`，不会提交到 Git。若本机没有该文件，可复制 `application-local.example.yml` 并命名为 `application-local.yml`。密钥不需要配置到小程序。
 
 在 IDEA 的“运行/调试配置 → 环境变量”中设置：
 
@@ -62,7 +62,7 @@
 - 用户数据隔离、个人数据 JSON 导出、账号删除、问题反馈
 - 题目草稿保存在小程序本机；创建与复习请求使用幂等键，编辑使用版本号避免静默覆盖
 - 图片私有存放在运行后端的电脑本地，通过登录态接口读取
-- 拍题后调用智谱 GLM-4.6V-Flash 多模态模型理解图片并整理题面，结果填入可编辑草稿；密钥只保存在后端本地配置
+- 拍题后调用 DeepSeek Flash 多模态模型理解图片并整理题面，结果填入可编辑草稿；密钥只保存在后端本地配置
 
 ## 5. 本地联调 API
 
@@ -79,4 +79,4 @@ API 前缀为 /api/v1。主要路由：
 - POST /recognition/question-image：图片识题，`multipart/form-data` 字段名为 `file`；返回识别状态、题面文本和提示
 - POST /feedback：意见反馈
 
-图片识题测试版使用智谱 `glm-4.6v-flash`：从相机拍摄或相册选择 JPG/PNG 图片后，小程序上传至后端；单张图片上限 10MB。后端将图片和指令一起发送给多模态模型，要求按题面结构整理图片中实际可见的内容，不解题、不猜答案、不补写缺失内容；学生仍需校对后保存。无清晰题目时提示重拍/重选；服务错误会显示明确原因，图片和本机草稿保留。当前 DEV_AUTH_ENABLED=true 只用于本地联调，不要把开发后端暴露到公网。
+图片识题测试版使用 DeepSeek `deepseek-flash`：从相机拍摄或相册选择 JPG/PNG 图片后，小程序上传至后端；单张图片上限 10MB。后端通过 OpenAI 兼容接口发送带 MIME 类型的 Base64 Data URL 和识题指令，要求按题面结构整理图片中实际可见的内容，不解题、不猜答案、不补写缺失内容；学生仍需校对后保存。无清晰题目时提示重拍/重选；服务错误会显示明确原因，图片和本机草稿保留。当前 DEV_AUTH_ENABLED=true 只用于本地联调，不要把开发后端暴露到公网。

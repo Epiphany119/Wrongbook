@@ -1,9 +1,10 @@
 package com.cuotiben.recognition.application;
 
 import com.cuotiben.common.ApiException;
-import com.cuotiben.recognition.config.GlmVisionProperties;
+import com.cuotiben.recognition.config.DeepSeekVisionProperties;
 import com.cuotiben.recognition.interfaces.QuestionImageRecognitionResponse;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -25,6 +26,8 @@ import java.util.Map;
 
 @Service
 public class QuestionImageRecognitionService {
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final long BUSY_RETRY_DELAY_MILLIS = 1_200L;
     private static final String UNREADABLE_MESSAGE = "未识别到清晰题目，请重新拍摄或选择图片。";
     private static final String NO_QUESTION_TEXT = "NO_QUESTION_TEXT";
     private static final String EXTRACTION_PROMPT = """
@@ -34,10 +37,10 @@ public class QuestionImageRecognitionService {
             如果图片不是练习题/试卷，或没有清晰可录入的题目文字，请仅输出：NO_QUESTION_TEXT
             """;
     private static final Logger log = LoggerFactory.getLogger(QuestionImageRecognitionService.class);
-    private final GlmVisionProperties properties;
+    private final DeepSeekVisionProperties properties;
     private final RestClient restClient;
 
-    public QuestionImageRecognitionService(GlmVisionProperties properties) {
+    public QuestionImageRecognitionService(DeepSeekVisionProperties properties) {
         this.properties = properties;
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(java.time.Duration.ofSeconds(10));
@@ -51,7 +54,7 @@ public class QuestionImageRecognitionService {
         }
         if (!StringUtils.hasText(properties.getApiKey())) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_NOT_CONFIGURED",
-                    "图片识题尚未配置，请在后端 application-local.yml 中填写智谱 API Key。");
+                    "图片识题尚未配置，请在后端 application-local.yml 中填写 DeepSeek API Key。");
         }
         if (file == null || file.isEmpty()) {
             throw ApiException.badRequest("请选择一张题目图片。");
@@ -71,8 +74,8 @@ public class QuestionImageRecognitionService {
             throw ApiException.badRequest("当前只支持 JPG 或 PNG 图片，请重新选择。");
         }
 
-        String base64 = Base64.getEncoder().encodeToString(imageBytes);
-        JsonNode response = callGlmVision(base64);
+        String dataUrl = "data:" + mimeType + ";base64," + Base64.getEncoder().encodeToString(imageBytes);
+        JsonNode response = callDeepSeekVision(dataUrl);
         String text = normalizeText(extractModelText(response));
         if (!isReadable(text)) {
             return new QuestionImageRecognitionResponse(false, "", UNREADABLE_MESSAGE);
@@ -80,44 +83,110 @@ public class QuestionImageRecognitionService {
         return new QuestionImageRecognitionResponse(true, text, "识别完成，请核对题目文字。");
     }
 
-    private JsonNode callGlmVision(String base64Image) {
+    private JsonNode callDeepSeekVision(String imageDataUrl) {
+        try {
+            return sendVisionRequest(imageDataUrl);
+        } catch (RestClientResponseException firstError) {
+            if (!isRetryable(firstError)) throw mapProviderError(firstError);
+            log.warn("DeepSeek Vision returned transient HTTP {}; retrying once", firstError.getStatusCode().value());
+            waitBeforeRetry();
+            try {
+                return sendVisionRequest(imageDataUrl);
+            } catch (RestClientResponseException retryError) {
+                throw mapProviderError(retryError);
+            } catch (RestClientException retryError) {
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_UNAVAILABLE",
+                        "连接图片识别服务失败，请检查电脑网络后重试。照片和题目草稿仍保存在本机。");
+            }
+        } catch (RestClientException error) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_UNAVAILABLE",
+                    "连接图片识别服务失败，请检查电脑网络后重试。照片和题目草稿仍保存在本机。");
+        }
+    }
+
+    private JsonNode sendVisionRequest(String imageDataUrl) {
         List<Map<String, Object>> content = List.of(
-                Map.of("type", "image_url", "image_url", Map.of("url", base64Image)),
-                Map.of("type", "text", "text", EXTRACTION_PROMPT)
+                Map.of("type", "text", "text", EXTRACTION_PROMPT),
+                Map.of("type", "image_url", "image_url", Map.of("url", imageDataUrl))
         );
         Map<String, Object> request = Map.of(
                 "model", properties.getModel(),
                 "messages", List.of(Map.of("role", "user", "content", content)),
                 "stream", false,
+                "thinking", Map.of("type", "disabled"),
                 "temperature", 0.1
         );
+        JsonNode body = restClient.post()
+                .uri(properties.getApiUrl())
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getApiKey().trim())
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(request)
+                .retrieve()
+                .body(JsonNode.class);
+        if (body == null || body.isNull()) {
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_EMPTY_RESPONSE",
+                    "图片识别服务没有返回结果，请稍后重试。照片和题目草稿仍保存在本机。");
+        }
+        return body;
+    }
+
+    private boolean isRetryable(RestClientResponseException error) {
+        int status = error.getStatusCode().value();
+        return status == 429 || status == 500 || status == 502 || status == 503 || status == 504;
+    }
+
+    private String providerErrorCode(RestClientResponseException error) {
         try {
-            JsonNode body = restClient.post()
-                    .uri(properties.getApiUrl())
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getApiKey().trim())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(request)
-                    .retrieve()
-                    .body(JsonNode.class);
-            if (body == null || body.isNull()) {
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_EMPTY_RESPONSE",
-                        "图片识别服务没有返回结果，请稍后重试。");
-            }
-            return body;
-        } catch (RestClientResponseException error) {
-            String responseBody = error.getResponseBodyAsString();
-            String detail = responseBody == null ? "" : responseBody.replaceAll("[\\r\\n\\t]+", " ").trim();
-            if (detail.length() > 500) detail = detail.substring(0, 500);
-            log.warn("GLM Vision returned HTTP {}: {}", error.getStatusCode().value(), detail);
-            if (error.getStatusCode().value() == 401 || error.getStatusCode().value() == 403) {
-                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_AUTH_FAILED",
-                        "智谱 API Key 无效或没有调用权限，请检查后端 application-local.yml。");
-            }
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_ERROR",
-                    "图片识别服务返回异常（HTTP " + error.getStatusCode().value() + "），请查看 IDEA 后端控制台。");
-        } catch (RestClientException error) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_UNAVAILABLE",
-                    "连接图片识别服务失败，请检查电脑网络后重试。");
+            JsonNode code = JSON.readTree(error.getResponseBodyAsString()).path("error").path("code");
+            return code.isMissingNode() || code.isNull() ? "" : code.asText();
+        } catch (IOException ignored) {
+            return "";
+        }
+    }
+
+    private void waitBeforeRetry() {
+        try {
+            Thread.sleep(BUSY_RETRY_DELAY_MILLIS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_RETRY_INTERRUPTED",
+                    "图片识题请求被中断，请稍后重试。照片和题目草稿仍保存在本机。");
+        }
+    }
+
+    private ApiException mapProviderError(RestClientResponseException error) {
+        int status = error.getStatusCode().value();
+        String code = providerErrorCode(error);
+        String message = providerErrorMessage(error);
+        log.warn("DeepSeek Vision returned HTTP {} (provider code {}): {}",
+                status, code.isEmpty() ? "unknown" : code, message);
+        if (status == 401 || status == 403) {
+            return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_AUTH_FAILED",
+                    "DeepSeek API Key 无效或没有调用权限，请检查后端 application-local.yml。");
+        }
+        if (status == 402) {
+            return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_QUOTA_EXHAUSTED",
+                    "DeepSeek 账户余额不足，请检查平台余额。照片和题目草稿仍保存在本机。");
+        }
+        if (status == 429) {
+            return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_RATE_LIMITED",
+                    "DeepSeek 图片识题请求达到速率或并发限制，请稍后重试。照片和题目草稿仍保存在本机。");
+        }
+        if (status == 500 || status == 502 || status == 503 || status == 504) {
+            return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_PROVIDER_BUSY",
+                    "DeepSeek 图片识题服务暂时繁忙，请稍后重试。照片和题目草稿仍保存在本机。");
+        }
+        return new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_ERROR",
+                "DeepSeek 图片识别请求失败（HTTP " + status + "），请检查 IDEA 后端日志。照片和题目草稿仍保存在本机。");
+    }
+
+    private String providerErrorMessage(RestClientResponseException error) {
+        try {
+            String message = JSON.readTree(error.getResponseBodyAsString()).path("error").path("message").asText("");
+            message = message.replaceAll("[\\r\\n\\t]+", " ").trim();
+            return message.length() > 300 ? message.substring(0, 300) : message;
+        } catch (IOException ignored) {
+            return "response body unavailable";
         }
     }
 
@@ -125,9 +194,9 @@ public class QuestionImageRecognitionService {
         JsonNode error = response.path("error");
         if (error.isObject()) {
             String message = error.path("message").asText("上游模型返回错误");
-            log.warn("GLM Vision error: {}", message);
+            log.warn("DeepSeek Vision returned an error payload: {}", message);
             throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_ERROR",
-                    "图片识题服务返回异常，请查看 IDEA 后端控制台。");
+                    "DeepSeek 图片识题服务返回异常，请查看 IDEA 后端控制台。");
         }
         JsonNode content = response.path("choices").path(0).path("message").path("content");
         return content.isTextual() ? content.asText() : "";

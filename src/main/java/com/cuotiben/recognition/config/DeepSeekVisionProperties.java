@@ -5,12 +5,12 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import java.net.URI;
 import java.time.Duration;
 
-@ConfigurationProperties(prefix = "app.glm-vision")
-public class GlmVisionProperties {
+@ConfigurationProperties(prefix = "app.deepseek-vision")
+public class DeepSeekVisionProperties {
     private boolean enabled;
     private String apiKey = "";
-    private URI apiUrl = URI.create("https://open.bigmodel.cn/api/paas/v4/chat/completions");
-    private String model = "glm-4.6v-flash";
+    private URI apiUrl = URI.create("https://api.deepseek.com/chat/completions");
+    private String model = "deepseek-flash";
     private Duration timeout = Duration.ofSeconds(120);
     private long maxImageBytes = 10 * 1024 * 1024;
     private int minReadableCharacters = 5;
