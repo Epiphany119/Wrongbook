@@ -8,7 +8,7 @@
 - 错题本-微信小程序前端：微信开发者工具工程
 - 错题本-后端/database/schema.sql：建库、建表和默认学科数据
 
-后端按身份档案、分类、错题、复习、练习、学习看板、附件和反馈划分业务模块。每个模块通过接口层接收请求、应用层编排用例；错题与复习规则放在领域层，数据库和本地附件访问放在基础设施层。
+后端按身份档案、分类、错题、复习、练习、学习看板、附件、图片识别和反馈划分业务模块。每个模块通过接口层接收请求、应用层编排用例；错题与复习规则放在领域层，数据库和本地附件访问放在基础设施层。
 
 ## 1. 初始化 MySQL
 
@@ -22,6 +22,8 @@
 2. 打开 src/main/resources/application.yml，将用户名和密码改成电脑本机 MySQL 的配置；也可以在 IDEA 的运行配置中设置环境变量 DB_USERNAME 和 DB_PASSWORD。
 3. 运行 com.cuotiben.WrongbookApplication。
 4. 后端监听 0.0.0.0:8080，浏览器打开 http://127.0.0.1:8080/api/v1/health 应看到 {"status":"UP","service":"wrongbook-api"}。
+
+本地默认启用 `local` 配置。图片 OCR 的密钥填写到 `src/main/resources/application-local.yml` 的 `app.glm-ocr.api-key`，该文件已加入 `.gitignore`，不会提交到 Git。若本机没有该文件，可复制 `application-local.example.yml` 并命名为 `application-local.yml`。密钥不需要配置到小程序。
 
 在 IDEA 的“运行/调试配置 → 环境变量”中设置：
 
@@ -60,6 +62,7 @@
 - 用户数据隔离、个人数据 JSON 导出、账号删除、问题反馈
 - 题目草稿保存在小程序本机；创建与复习请求使用幂等键，编辑使用版本号避免静默覆盖
 - 图片私有存放在运行后端的电脑本地，通过登录态接口读取
+- 拍题后自动调用 GLM-OCR 提取可见文字，结果填入可编辑题干；密钥只保存在后端本地配置
 
 ## 5. 本地联调 API
 
@@ -73,6 +76,7 @@ API 前缀为 /api/v1。主要路由：
 - POST /practice-sessions、POST /practice-sessions/{id}/answers：练习
 - GET /dashboard：学习进度
 - POST /questions/{id}/attachments、GET /attachments/{id}：图片
+- POST /recognition/question-image：题目图片 OCR，`multipart/form-data` 字段名为 `file`；返回识别状态、题干文本和提示
 - POST /feedback：意见反馈
 
-OCR、订阅提醒、家庭和班级关系、PDF 导出属于后续阶段。当前 DEV_AUTH_ENABLED=true 只用于本地联调，不要把开发后端暴露到公网。
+OCR 当前为待填写密钥并真机验收的测试版：从相机拍摄或相册选择 JPG/PNG 图片后，小程序上传至后端；单张图片上限 10MB。后端将图片发给 GLM-OCR，仅提取可见文字，不生成答案或解析。空白、过短或明显噪声结果会提示重新拍摄/选择；服务错误会显示明确原因，图片和本机草稿保留。当前 DEV_AUTH_ENABLED=true 只用于本地联调，不要把开发后端暴露到公网。
