@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS review_events (
     session_id CHAR(36) NULL,
     request_key VARCHAR(120) NOT NULL,
     result VARCHAR(20) NOT NULL,
+    mastery_rating TINYINT NULL,
     confidence TINYINT NULL,
     duration_seconds INT NULL,
     question_version BIGINT NOT NULL,

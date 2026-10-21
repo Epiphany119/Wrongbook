@@ -41,7 +41,7 @@ public class QuestionService {
         validateDate(dateFrom);
         validateDate(dateTo);
         QuestionFilter filter = new QuestionFilter(keyword, subjectId, chapterId, dateFrom, dateTo, knowledgePointId,
-                tag, errorReason, state, dueOnly);
+                tag, errorReason, state, dueOnly, null);
         return Map.of("items", questions.list(userId, filter, safePage, safeSize, sort),
                 "page", safePage, "pageSize", safeSize, "total", questions.count(userId, filter));
     }
@@ -61,7 +61,8 @@ public class QuestionService {
                         FROM question_attachments WHERE question_id=? AND owner_id=? ORDER BY created_at
                         """, id, userId),
                 "timeline", jdbc.queryForList("""
-                        SELECT id, result, confidence, duration_seconds AS durationSeconds,
+                        SELECT id, result, mastery_rating AS masteryRating,
+                               duration_seconds AS durationSeconds,
                                occurred_at AS occurredAt, next_review_at AS nextReviewAt,
                                policy_version AS policyVersion
                         FROM review_events WHERE question_id=? AND owner_id=? ORDER BY occurred_at DESC

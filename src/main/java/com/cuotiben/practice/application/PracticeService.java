@@ -32,11 +32,19 @@ public class PracticeService {
 
     @Transactional
     public Map<String, Object> start(String userId, PracticeCommand command) {
-        PracticeCommand safe = command == null ? new PracticeCommand(null, null, null, null, false, 10) : command;
+        PracticeCommand safe = command == null ? new PracticeCommand(null, null, null, null, false, 10, null) : command;
         int limit = Math.max(1, Math.min(50, safe.limit() == null ? 10 : safe.limit()));
-        QuestionFilter filter = new QuestionFilter(null, safe.subjectId(), safe.chapterId(), null, null,
-                safe.knowledgePointId(), null, safe.errorReason(), null, safe.dueOnly());
-        List<QuestionRecord> selected = questions.list(userId, filter, 1, limit, "DUE_SOON");
+        List<QuestionRecord> selected;
+        if (safe.questionId() != null && !safe.questionId().isBlank()) {
+            QuestionRecord target = questions.findOwned(safe.questionId(), userId);
+            if (target == null) throw ApiException.notFound("错题不存在或已移入回收站。");
+            if ("ARCHIVED".equals(target.masteryState())) throw ApiException.conflict("已归档的错题不能练习。");
+            selected = List.of(target);
+        } else {
+            QuestionFilter filter = new QuestionFilter(null, safe.subjectId(), safe.chapterId(), null, null,
+                    safe.knowledgePointId(), null, safe.errorReason(), null, safe.dueOnly(), true);
+            selected = questions.list(userId, filter, 1, limit, "DUE_SOON");
+        }
         if (selected.isEmpty()) return Map.of("sessionId", "", "totalCount", 0, "items", List.of());
 
         String sessionId = UUID.randomUUID().toString();
@@ -47,6 +55,7 @@ public class PracticeService {
         conditions.put("knowledgePointId", safe.knowledgePointId());
         conditions.put("errorReason", safe.errorReason());
         conditions.put("dueOnly", safe.dueOnly());
+        conditions.put("questionId", safe.questionId());
         jdbc.update("""
                 INSERT INTO practice_sessions
                     (id, owner_id, session_filters, question_ids, total_count, correct_count, started_at)
@@ -76,7 +85,7 @@ public class PracticeService {
             if (!submittedIds.add(answer.questionId())) throw ApiException.badRequest("一次提交中不能重复包含同一道题。");
             String requestKey = sessionId + ":" + answer.questionId();
             Map<String, Object> review = reviews.record(userId, answer.questionId(),
-                    new ReviewService.ReviewCommand(requestKey, answer.result(), answer.confidence(),
+                    new ReviewService.ReviewCommand(requestKey, null, answer.rating(), null,
                             answer.durationSeconds()), sessionId);
             QuestionRecord updated = (QuestionRecord) review.get("question");
             Map<String, Object> item = new LinkedHashMap<>();
@@ -88,7 +97,10 @@ public class PracticeService {
             item.put("ownAnswer", updated.ownAnswer());
             item.put("errorReason", updated.errorReason());
             item.put("questionType", updated.questionType());
-            item.put("submittedResult", answer.result());
+            @SuppressWarnings("unchecked")
+            Map<String, Object> event = (Map<String, Object>) review.get("event");
+            item.put("submittedResult", event.get("result"));
+            item.put("masteryRating", event.get("masteryRating"));
             item.put("nextReviewAt", updated.nextReviewAt() == null ? null : updated.nextReviewAt().toString());
             results.add(item);
         }
@@ -119,9 +131,9 @@ public class PracticeService {
     }
 
     public record PracticeCommand(String subjectId, String chapterId, String knowledgePointId,
-                                  String errorReason, Boolean dueOnly, Integer limit) {}
+                                  String errorReason, Boolean dueOnly, Integer limit, String questionId) {}
     public record AnswersCommand(List<AnswerCommand> answers) {}
-    public record AnswerCommand(String questionId, String result, Integer confidence, Integer durationSeconds) {}
+    public record AnswerCommand(String questionId, Integer rating, Integer durationSeconds) {}
     public record PracticeQuestion(String id, String questionText, String subjectName, String chapterName,
                                    String ownAnswer, String correctAnswer, String correction, String explanation,
                                    String errorReason, String questionType, String nextReviewAt, long version) {}

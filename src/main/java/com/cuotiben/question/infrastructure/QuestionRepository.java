@@ -169,6 +169,7 @@ public class QuestionRepository {
             if (notBlank(filter.errorReason())) { where.append(" AND q.error_reason=?"); args.add(filter.errorReason()); }
             if (notBlank(filter.state())) { where.append(" AND q.mastery_state=?"); args.add(filter.state().toUpperCase()); }
             if (Boolean.TRUE.equals(filter.dueOnly())) where.append(" AND q.next_review_at <= NOW(3)");
+            if (Boolean.TRUE.equals(filter.recentOnly())) where.append(" AND q.created_at >= DATE_SUB(NOW(3), INTERVAL 7 DAY)");
         }
         return new SqlFilter(where.toString(), args);
     }
@@ -210,7 +211,8 @@ public class QuestionRepository {
     private record SqlFilter(String where, List<Object> args) {}
 
     public record QuestionFilter(String keyword, String subjectId, String chapterId, String dateFrom, String dateTo,
-                                 String knowledgePointId, String tag, String errorReason, String state, Boolean dueOnly) {}
+                                 String knowledgePointId, String tag, String errorReason, String state, Boolean dueOnly,
+                                 Boolean recentOnly) {}
 
     public interface QuestionRecordCommand {
         String idempotencyKey();

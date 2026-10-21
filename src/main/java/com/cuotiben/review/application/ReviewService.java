@@ -30,7 +30,10 @@ public class ReviewService {
     @Transactional
     public Map<String, Object> record(String userId, String questionId, ReviewCommand command, String sessionId) {
         if (command == null) throw ApiException.badRequest("复习内容不能为空。");
-        ReviewResult result = ReviewResult.parse(command.result());
+        Integer masteryRating = command.rating() != null ? command.rating() : command.confidence();
+        ReviewResult result = command.rating() == null
+                ? ReviewResult.parse(command.result())
+                : ReviewResult.fromMasteryRating(command.rating());
         String requestKey = command.idempotencyKey() == null || command.idempotencyKey().isBlank()
                 ? UUID.randomUUID().toString() : command.idempotencyKey().trim();
         if (requestKey.length() > 120) throw ApiException.badRequest("复习请求标识过长。");
@@ -40,7 +43,7 @@ public class ReviewService {
                 throw ApiException.conflict("复习请求标识已用于其他题目。");
             }
             if (!result.name().equals(String.valueOf(previous.get("result")))
-                    || !sameNumber(previous.get("confidence"), command.confidence())
+                    || !sameNumber(previous.get("masteryRating") != null ? previous.get("masteryRating") : previous.get("confidence"), masteryRating)
                     || !sameNumber(previous.get("durationSeconds"), command.durationSeconds())
                     || !sameId(previous.get("sessionId"), sessionId)) {
                 throw ApiException.conflict("复习请求标识已用于不同的提交内容。");
@@ -50,8 +53,8 @@ public class ReviewService {
 
         QuestionRecord question = requireQuestion(questionId, userId);
         if ("ARCHIVED".equals(question.masteryState())) throw ApiException.conflict("已归档的错题不能复习。");
-        if (command.confidence() != null && (command.confidence() < 1 || command.confidence() > 5)) {
-            throw ApiException.badRequest("信心评分范围为1到5。");
+        if (masteryRating != null && (masteryRating < 1 || masteryRating > 5)) {
+            throw ApiException.badRequest("掌握度评分范围为1到5。");
         }
         if (command.durationSeconds() != null
                 && (command.durationSeconds() < 0 || command.durationSeconds() > 86400)) {
@@ -69,7 +72,9 @@ public class ReviewService {
         if (updated != 1) throw ApiException.conflict("错题已更新，请刷新后重新记录复习结果。");
 
         String eventId = UUID.randomUUID().toString();
-        reviews.insert(eventId, userId, questionId, sessionId, requestKey, result.name(), command.confidence(),
+        reviews.insert(eventId, userId, questionId, sessionId, requestKey, result.name(),
+                command.rating() == null ? null : masteryRating,
+                command.rating() == null ? command.confidence() : null,
                 command.durationSeconds(), question.version() + 1, nextReviewAt, schedule.policyVersion());
         Map<String, Object> event = reviews.findByRequestKey(userId, requestKey);
         return response(event, requireQuestion(questionId, userId));
@@ -98,5 +103,5 @@ public class ReviewService {
         return requested.equals(String.valueOf(stored));
     }
 
-    public record ReviewCommand(String idempotencyKey, String result, Integer confidence, Integer durationSeconds) {}
+    public record ReviewCommand(String idempotencyKey, String result, Integer rating, Integer confidence, Integer durationSeconds) {}
 }

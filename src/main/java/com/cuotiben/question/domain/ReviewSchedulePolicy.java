@@ -1,7 +1,7 @@
 package com.cuotiben.question.domain;
 
 public final class ReviewSchedulePolicy {
-    public static final String VERSION = "interval-v1";
+    public static final String VERSION = "interval-five-rating-v2";
     private static final int[] INTERVALS = {1, 3, 7, 14};
 
     private ReviewSchedulePolicy() {}
