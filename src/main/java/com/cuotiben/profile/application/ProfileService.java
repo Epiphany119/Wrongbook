@@ -91,6 +91,10 @@ public class ProfileService {
                         FROM review_events r JOIN question_records q ON q.id = r.question_id
                         WHERE q.owner_id = ? ORDER BY r.occurred_at DESC
                         """, userId),
+                "reflections", jdbc.queryForList("""
+                        SELECT id, question_id AS questionId, part_number AS partNumber, content, created_at AS createdAt
+                        FROM question_reflections WHERE owner_id=? ORDER BY created_at DESC
+                        """, userId),
                 "attachments", jdbc.queryForList("""
                         SELECT id, question_id AS questionId, file_name AS fileName, mime_type AS mimeType,
                                byte_size AS byteSize, CONCAT('/api/v1/attachments/', id) AS fileUrl

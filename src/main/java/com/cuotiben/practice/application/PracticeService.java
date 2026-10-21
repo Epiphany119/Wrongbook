@@ -55,7 +55,9 @@ public class PracticeService {
 
         List<PracticeQuestion> items = selected.stream().map(question -> new PracticeQuestion(
                 question.id(), question.questionText(), question.subjectName(), question.chapterName(),
-                question.errorReason(), question.nextReviewAt() == null ? null : question.nextReviewAt().toString(),
+                question.ownAnswer(), question.correctAnswer(), question.correction(), question.explanation(),
+                question.errorReason(), question.questionType(),
+                question.nextReviewAt() == null ? null : question.nextReviewAt().toString(),
                 question.version())).toList();
         return Map.of("sessionId", sessionId, "totalCount", items.size(), "items", items);
     }
@@ -84,6 +86,8 @@ public class PracticeService {
             item.put("correction", updated.correction());
             item.put("explanation", updated.explanation());
             item.put("ownAnswer", updated.ownAnswer());
+            item.put("errorReason", updated.errorReason());
+            item.put("questionType", updated.questionType());
             item.put("submittedResult", answer.result());
             item.put("nextReviewAt", updated.nextReviewAt() == null ? null : updated.nextReviewAt().toString());
             results.add(item);
@@ -119,5 +123,6 @@ public class PracticeService {
     public record AnswersCommand(List<AnswerCommand> answers) {}
     public record AnswerCommand(String questionId, String result, Integer confidence, Integer durationSeconds) {}
     public record PracticeQuestion(String id, String questionText, String subjectName, String chapterName,
-                                   String errorReason, String nextReviewAt, long version) {}
+                                   String ownAnswer, String correctAnswer, String correction, String explanation,
+                                   String errorReason, String questionType, String nextReviewAt, long version) {}
 }

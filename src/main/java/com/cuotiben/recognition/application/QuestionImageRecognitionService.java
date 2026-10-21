@@ -1,7 +1,7 @@
 package com.cuotiben.recognition.application;
 
 import com.cuotiben.common.ApiException;
-import com.cuotiben.recognition.config.GlmOcrProperties;
+import com.cuotiben.recognition.config.GlmVisionProperties;
 import com.cuotiben.recognition.interfaces.QuestionImageRecognitionResponse;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
@@ -20,16 +20,24 @@ import org.springframework.web.util.HtmlUtils;
 
 import java.io.IOException;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 
 @Service
 public class QuestionImageRecognitionService {
-    private static final String UNREADABLE_MESSAGE = "未识别到清晰文字，请重新拍摄或选择图片。";
+    private static final String UNREADABLE_MESSAGE = "未识别到清晰题目，请重新拍摄或选择图片。";
+    private static final String NO_QUESTION_TEXT = "NO_QUESTION_TEXT";
+    private static final String EXTRACTION_PROMPT = """
+            请识别这张图片中的历史学科题目，并仅输出可编辑的 Markdown 题面，不要寒暄、解释识别过程或添加代码围栏。
+            保留图片中实际可见的章节标题、题号、材料、题干、A-D选项、答案和解析；每个选项单独一行，题目之间空一行。
+            只能抄录图片里确实出现的内容。不得解题、推测正确答案、编造解析、改写或补齐模糊/缺失的文字；无法辨认的局部用【无法辨认】标记。
+            如果图片不是练习题/试卷，或没有清晰可录入的题目文字，请仅输出：NO_QUESTION_TEXT
+            """;
     private static final Logger log = LoggerFactory.getLogger(QuestionImageRecognitionService.class);
-    private final GlmOcrProperties properties;
+    private final GlmVisionProperties properties;
     private final RestClient restClient;
 
-    public QuestionImageRecognitionService(GlmOcrProperties properties) {
+    public QuestionImageRecognitionService(GlmVisionProperties properties) {
         this.properties = properties;
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(java.time.Duration.ofSeconds(10));
@@ -39,11 +47,11 @@ public class QuestionImageRecognitionService {
 
     public QuestionImageRecognitionResponse recognize(MultipartFile file) {
         if (!properties.isEnabled()) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "OCR_DISABLED", "图片文字识别暂未启用。");
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_DISABLED", "图片识题暂未启用。");
         }
         if (!StringUtils.hasText(properties.getApiKey())) {
-            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "OCR_NOT_CONFIGURED",
-                    "图片文字识别尚未配置，请在后端 application-local.yml 中填写 GLM API Key。");
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_NOT_CONFIGURED",
+                    "图片识题尚未配置，请在后端 application-local.yml 中填写智谱 API Key。");
         }
         if (file == null || file.isEmpty()) {
             throw ApiException.badRequest("请选择一张题目图片。");
@@ -63,27 +71,36 @@ public class QuestionImageRecognitionService {
             throw ApiException.badRequest("当前只支持 JPG 或 PNG 图片，请重新选择。");
         }
 
-        String dataUri = "data:" + mimeType + ";base64," + Base64.getEncoder().encodeToString(imageBytes);
-        JsonNode response = callGlmOcr(dataUri);
-        String text = normalizeText(extractRecognizedText(response));
+        String base64 = Base64.getEncoder().encodeToString(imageBytes);
+        JsonNode response = callGlmVision(base64);
+        String text = normalizeText(extractModelText(response));
         if (!isReadable(text)) {
             return new QuestionImageRecognitionResponse(false, "", UNREADABLE_MESSAGE);
         }
         return new QuestionImageRecognitionResponse(true, text, "识别完成，请核对题目文字。");
     }
 
-    private JsonNode callGlmOcr(String dataUri) {
+    private JsonNode callGlmVision(String base64Image) {
+        List<Map<String, Object>> content = List.of(
+                Map.of("type", "image_url", "image_url", Map.of("url", base64Image)),
+                Map.of("type", "text", "text", EXTRACTION_PROMPT)
+        );
+        Map<String, Object> request = Map.of(
+                "model", properties.getModel(),
+                "messages", List.of(Map.of("role", "user", "content", content)),
+                "stream", false,
+                "temperature", 0.1
+        );
         try {
             JsonNode body = restClient.post()
                     .uri(properties.getApiUrl())
-                    // GLM-OCR layout_parsing uses the raw API key in Authorization (without "Bearer ").
-                    .header(HttpHeaders.AUTHORIZATION, properties.getApiKey().trim())
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getApiKey().trim())
                     .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of("model", properties.getModel(), "file", dataUri))
+                    .body(request)
                     .retrieve()
                     .body(JsonNode.class);
             if (body == null || body.isNull()) {
-                throw new ApiException(HttpStatus.BAD_GATEWAY, "OCR_EMPTY_RESPONSE",
+                throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_EMPTY_RESPONSE",
                         "图片识别服务没有返回结果，请稍后重试。");
             }
             return body;
@@ -91,55 +108,34 @@ public class QuestionImageRecognitionService {
             String responseBody = error.getResponseBodyAsString();
             String detail = responseBody == null ? "" : responseBody.replaceAll("[\\r\\n\\t]+", " ").trim();
             if (detail.length() > 500) detail = detail.substring(0, 500);
-            log.warn("GLM-OCR returned HTTP {}: {}", error.getStatusCode().value(), detail);
+            log.warn("GLM Vision returned HTTP {}: {}", error.getStatusCode().value(), detail);
             if (error.getStatusCode().value() == 401 || error.getStatusCode().value() == 403) {
-                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "OCR_AUTH_FAILED",
-                        "GLM API Key 无效或没有调用权限，请检查后端 application-local.yml。");
+                throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "VISION_AUTH_FAILED",
+                        "智谱 API Key 无效或没有调用权限，请检查后端 application-local.yml。");
             }
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "OCR_PROVIDER_ERROR",
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_ERROR",
                     "图片识别服务返回异常（HTTP " + error.getStatusCode().value() + "），请查看 IDEA 后端控制台。");
         } catch (RestClientException error) {
-            throw new ApiException(HttpStatus.BAD_GATEWAY, "OCR_PROVIDER_UNAVAILABLE",
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_UNAVAILABLE",
                     "连接图片识别服务失败，请检查电脑网络后重试。");
         }
     }
 
-    private String extractRecognizedText(JsonNode response) {
-        for (String field : new String[]{"md_results", "text", "content", "data"}) {
-            String text = extractTextNode(response.get(field));
-            if (StringUtils.hasText(text)) {
-                return text;
-            }
+    private String extractModelText(JsonNode response) {
+        JsonNode error = response.path("error");
+        if (error.isObject()) {
+            String message = error.path("message").asText("上游模型返回错误");
+            log.warn("GLM Vision error: {}", message);
+            throw new ApiException(HttpStatus.BAD_GATEWAY, "VISION_PROVIDER_ERROR",
+                    "图片识题服务返回异常，请查看 IDEA 后端控制台。");
         }
-        return "";
-    }
-
-    private String extractTextNode(JsonNode node) {
-        if (node == null || node.isNull()) return "";
-        if (node.isTextual()) return node.asText();
-        if (node.isArray()) {
-            StringBuilder text = new StringBuilder();
-            for (JsonNode item : node) {
-                String value = extractTextNode(item);
-                if (StringUtils.hasText(value)) {
-                    if (text.length() > 0) text.append('\n');
-                    text.append(value);
-                }
-            }
-            return text.toString();
-        }
-        if (node.isObject()) {
-            for (String field : new String[]{"md_results", "text", "content", "result"}) {
-                String text = extractTextNode(node.get(field));
-                if (StringUtils.hasText(text)) return text;
-            }
-        }
-        return "";
+        JsonNode content = response.path("choices").path(0).path("message").path("content");
+        return content.isTextual() ? content.asText() : "";
     }
 
     private String normalizeText(String source) {
         if (!StringUtils.hasText(source)) return "";
-        String text = source.replaceAll("(?is)!\\[[^]]*]\\(page=\\d+,bbox=\\[[^]]*]\\)", "")
+        String text = source.replaceAll("(?s)^\\s*```(?:markdown|md)?\\s*|\\s*```\\s*$", "")
                 .replaceAll("(?i)<br\\s*/?>", "\n")
                 .replaceAll("(?i)</tr\\s*>", "\n")
                 .replaceAll("(?i)</(td|th)\\s*>", " | ")
@@ -181,7 +177,8 @@ public class QuestionImageRecognitionService {
                 || normalized.equals("图片中没有文字")
                 || normalized.equals("图片中未检测到文字")
                 || normalized.equals("notextdetected")
-                || normalized.equals("notextfound");
+                || normalized.equals("notextfound")
+                || normalized.equals("noquestiontext");
     }
 
     private boolean hasLongRepeatedCharacter(String text, int limit) {

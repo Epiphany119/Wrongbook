@@ -1,10 +1,10 @@
-# 本机开发配置示例。复制为 application-local.yml 后在 api-key 中填写密钥。
+# 本机开发配置示例。复制为 application-local.yml 后在 api-key 中填写智谱 API Key。
 app:
-  glm-ocr:
+  glm-vision:
     enabled: true
     api-key: ""
-    api-url: https://open.bigmodel.cn/api/paas/v4/layout_parsing
-    model: glm-ocr
+    api-url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    model: glm-4.6v-flash
     timeout: 120s
     max-image-bytes: 10485760
     min-readable-characters: 5

@@ -60,6 +60,17 @@ public class QuestionController {
         return service.detail(userId, id);
     }
 
+    @GetMapping("/questions/{id}/reflections")
+    public List<?> reflections(@RequestAttribute("userId") String userId, @PathVariable String id) {
+        return service.reflections(userId, id);
+    }
+
+    @PostMapping("/questions/{id}/reflections")
+    public Object addReflection(@RequestAttribute("userId") String userId, @PathVariable String id,
+                                @RequestBody QuestionService.ReflectionCommand command) {
+        return service.addReflection(userId, id, command);
+    }
+
     @PutMapping("/questions/{id}")
     public QuestionRecord update(@RequestAttribute("userId") String userId, @PathVariable String id,
                                  @RequestBody QuestionService.QuestionCommand command) {

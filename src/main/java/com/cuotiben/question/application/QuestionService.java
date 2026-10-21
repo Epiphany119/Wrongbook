@@ -4,6 +4,8 @@ import com.cuotiben.common.ApiException;
 import com.cuotiben.common.JsonCodec;
 import com.cuotiben.question.domain.QuestionRecord;
 import com.cuotiben.question.infrastructure.QuestionRepository;
+import com.cuotiben.question.infrastructure.QuestionReflectionRepository;
+import com.cuotiben.question.infrastructure.QuestionReflectionRepository.Reflection;
 import com.cuotiben.question.infrastructure.QuestionRepository.QuestionFilter;
 import com.cuotiben.question.infrastructure.QuestionRepository.QuestionRecordCommand;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,11 +21,14 @@ import java.util.UUID;
 @Service
 public class QuestionService {
     private final QuestionRepository questions;
+    private final QuestionReflectionRepository reflections;
     private final JdbcTemplate jdbc;
     private final JsonCodec json;
 
-    public QuestionService(QuestionRepository questions, JdbcTemplate jdbc, JsonCodec json) {
+    public QuestionService(QuestionRepository questions, QuestionReflectionRepository reflections,
+                           JdbcTemplate jdbc, JsonCodec json) {
         this.questions = questions;
+        this.reflections = reflections;
         this.jdbc = jdbc;
         this.json = json;
     }
@@ -60,8 +65,29 @@ public class QuestionService {
                                occurred_at AS occurredAt, next_review_at AS nextReviewAt,
                                policy_version AS policyVersion
                         FROM review_events WHERE question_id=? AND owner_id=? ORDER BY occurred_at DESC
-                        """, id, userId)
+                        """, id, userId),
+                "reflections", reflections.list(id, userId)
         );
+    }
+
+    public List<Reflection> reflections(String userId, String id) {
+        require(id, userId);
+        return reflections.list(id, userId);
+    }
+
+    @Transactional
+    public Reflection addReflection(String userId, String id, ReflectionCommand command) {
+        require(id, userId);
+        if (command == null || command.content() == null || command.content().isBlank()) {
+            throw ApiException.badRequest("请先写下新的思考或反思。");
+        }
+        String content = command.content().trim();
+        if (content.length() > 4000) throw ApiException.badRequest("随笔不能超过4000个字符。");
+        Integer partNumber = command.partNumber();
+        if (partNumber != null && (partNumber < 1 || partNumber > 500)) {
+            throw ApiException.badRequest("题号范围不正确。");
+        }
+        return reflections.create(UUID.randomUUID().toString(), id, userId, partNumber, content);
     }
 
     @Transactional
@@ -208,6 +234,8 @@ public class QuestionService {
             String questionType,
             Long version
     ) {}
+
+    public record ReflectionCommand(String content, Integer partNumber) {}
 
     private record StoredCommand(
             String idempotencyKey,
