@@ -33,7 +33,8 @@ public class QuestionImageRecognitionService {
     private static final String EXTRACTION_PROMPT = """
             请识别这张图片中的历史学科题目，并仅输出可编辑的 Markdown 题面，不要寒暄、解释识别过程或添加代码围栏。
             保留图片中实际可见的章节标题、题号、材料、题干、A-D选项、答案和解析；每个选项单独一行，题目之间空一行。
-            只能抄录图片里确实出现的内容。不得解题、推测正确答案、编造解析、改写或补齐模糊/缺失的文字；无法辨认的局部用【无法辨认】标记。
+            答案只抄录清晰印刷在题目或答案区中的标准答案。红笔/手写订正、勾叉、批注不作为标准答案，不要放进“答案”或“解析”；如果答案只有红笔或手写订正，省略答案行，让学生之后填写。
+            只能抄录图片里确实出现的印刷内容。不得解题、推测正确答案、编造解析、改写或补齐模糊/缺失的文字；无法辨认的印刷内容用【无法辨认】标记。
             如果图片不是练习题/试卷，或没有清晰可录入的题目文字，请仅输出：NO_QUESTION_TEXT
             """;
     private static final Logger log = LoggerFactory.getLogger(QuestionImageRecognitionService.class);
