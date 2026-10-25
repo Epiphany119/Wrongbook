@@ -23,6 +23,8 @@ import java.io.IOException;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class QuestionImageRecognitionService {
@@ -30,12 +32,17 @@ public class QuestionImageRecognitionService {
     private static final long BUSY_RETRY_DELAY_MILLIS = 1_200L;
     private static final String UNREADABLE_MESSAGE = "未识别到清晰题目，请重新拍摄或选择图片。";
     private static final String NO_QUESTION_TEXT = "NO_QUESTION_TEXT";
+    private static final Pattern SECTION_LABEL = Pattern.compile(
+            "\\*{0,2}(答案解析|解题思路|正确答案|参考答案|标准答案|答案|解析)\\*{0,2}\\s*[:：=]\\s*\\*{0,2}\\s*");
     private static final String EXTRACTION_PROMPT = """
-            请识别这张图片中的历史学科题目，并仅输出可编辑的 Markdown 题面，不要寒暄、解释识别过程或添加代码围栏。
-            保留图片中实际可见的章节标题、题号、材料、题干和A-D选项；如有清晰印刷的答案或解析，分别用“答案：...”和“解析：...”独立分行；每个选项单独一行，题目之间空一行。
-            答案只抄录清晰印刷在题目或答案区中的标准答案。红笔/手写订正、勾叉、批注不作为标准答案，不要放进“答案”或“解析”；如果答案只有红笔或手写订正，省略答案行，让学生之后填写。
-            只能抄录图片里确实出现的印刷内容。不得解题、推测正确答案、编造解析、改写或补齐模糊/缺失的文字；无法辨认的印刷内容用【无法辨认】标记。
-            如果图片不是练习题/试卷，或没有清晰可录入的题目文字，请仅输出：NO_QUESTION_TEXT
+            请从图片中识别历史学科题目，并把题目、标准答案、解析分别提取。只输出一个合法 JSON 对象，不要 Markdown 代码围栏或额外说明，格式如下：
+            {"questionText":"题面 Markdown","correctAnswer":"清晰印刷的标准答案；没有时为空字符串","explanation":"图片中印刷的解析；没有时为空字符串","answerSource":"PRINTED、NONE 或 HANDWRITTEN_ONLY"}
+            questionText 只放章节标题、题号、材料、题干和 A-D 选项；不要把答案或解析混在题面中。保留原有题号、换行和选项层级。
+            correctAnswer 只抄录清晰印刷在题目或答案区中的标准答案。多个小题按原题号分行，例如“1. B\\n2. 秦朝”。不要自行推导或补答案。
+            explanation 只抄录图片中明确印刷的解析，不要根据题目自行生成。
+            红笔/手写订正、勾叉、批注不作为标准答案。如果答案只有红笔或手写订正，correctAnswer 必须为空字符串且 answerSource 为 HANDWRITTEN_ONLY；没有找到清晰印刷答案时 answerSource 为 NONE；识别到清晰印刷答案时 answerSource 为 PRINTED。
+            只能抄录图片里确实出现的印刷内容，不得解题、猜测答案、编造解析、改写或补齐模糊/缺失内容；无法辨认的印刷内容用【无法辨认】标记。
+            如果图片不是练习题/试卷，或没有清晰可录入的题目文字，输出：{"questionText":"NO_QUESTION_TEXT","correctAnswer":"","explanation":"","answerSource":"NONE"}
             """;
     private static final Logger log = LoggerFactory.getLogger(QuestionImageRecognitionService.class);
     private final DeepSeekVisionProperties properties;
@@ -77,11 +84,133 @@ public class QuestionImageRecognitionService {
 
         String dataUrl = "data:" + mimeType + ";base64," + Base64.getEncoder().encodeToString(imageBytes);
         JsonNode response = callDeepSeekVision(dataUrl);
-        String text = normalizeText(extractModelText(response));
-        if (!isReadable(text)) {
-            return new QuestionImageRecognitionResponse(false, "", UNREADABLE_MESSAGE);
+        String modelText = extractModelText(response);
+        RecognizedContent content = parseModelContent(modelText);
+        String questionText = normalizeText(content.questionText());
+        if (!isReadable(questionText)) {
+            return new QuestionImageRecognitionResponse(false, "", "", "", "", "NONE", UNREADABLE_MESSAGE);
         }
-        return new QuestionImageRecognitionResponse(true, text, "识别完成，请核对题目文字。");
+        String correctAnswer = normalizeAnswerField(content.correctAnswer(), false);
+        String explanation = normalizeAnswerField(content.explanation(), true);
+        String answerSource = StringUtils.hasText(correctAnswer)
+                ? "PRINTED" : normalizeAnswerSource(content.answerSource());
+        String message = StringUtils.hasText(correctAnswer)
+                ? "识别完成，已提取题目和参考答案，请核对。"
+                : "识别完成，未发现清晰印刷答案；你可以补充，或稍后再填写。";
+        return new QuestionImageRecognitionResponse(true, questionText, questionText, correctAnswer,
+                explanation, answerSource, message);
+    }
+
+    private RecognizedContent parseModelContent(String modelText) {
+        if (!StringUtils.hasText(modelText) || isNoTextNotice(modelText)) {
+            return RecognizedContent.empty();
+        }
+
+        String json = stripCodeFence(modelText);
+        int objectStart = json.indexOf('{');
+        int objectEnd = json.lastIndexOf('}');
+        if (objectStart >= 0 && objectEnd > objectStart) json = json.substring(objectStart, objectEnd + 1);
+        try {
+            JsonNode root = JSON.readTree(json);
+            if (root != null && root.isObject()) {
+                String questionText = firstText(root, "questionText", "question", "text", "markdown");
+                String answer = firstText(root, "correctAnswer", "answer", "standardAnswer");
+                String explanation = firstText(root, "explanation", "analysis");
+                String answerSource = firstText(root, "answerSource");
+                return splitEmbeddedSections(questionText, answer, explanation, answerSource);
+            }
+        } catch (IOException ignored) {
+            // Keep older/plain-text model responses working while the new prompt uses JSON fields.
+        }
+        if (json.contains("\"questionText\"") || json.startsWith("{")) {
+            return RecognizedContent.empty();
+        }
+        return splitEmbeddedSections(modelText, "", "", "");
+    }
+
+    private RecognizedContent splitEmbeddedSections(String questionText, String correctAnswer,
+                                                     String explanation, String answerSource) {
+        StringBuilder question = new StringBuilder();
+        StringBuilder embeddedAnswer = new StringBuilder();
+        StringBuilder embeddedExplanation = new StringBuilder();
+        String section = "question";
+        for (String line : String.valueOf(questionText == null ? "" : questionText).replace('\r', '\n').split("\\n")) {
+            Matcher matcher = SECTION_LABEL.matcher(line);
+            int cursor = 0;
+            boolean foundLabel = false;
+            while (matcher.find()) {
+                foundLabel = true;
+                appendSection(section, line.substring(cursor, matcher.start()), question, embeddedAnswer, embeddedExplanation);
+                section = isExplanationLabel(matcher.group(1)) ? "explanation" : "answer";
+                cursor = matcher.end();
+            }
+            if (foundLabel) {
+                appendSection(section, line.substring(cursor), question, embeddedAnswer, embeddedExplanation);
+            } else {
+                appendSection(section, line, question, embeddedAnswer, embeddedExplanation);
+            }
+        }
+
+        String declaredSource = normalizeAnswerSource(answerSource);
+        boolean modelDeclaredNoPrintedAnswer = StringUtils.hasText(answerSource)
+                && ("NONE".equals(declaredSource) || "HANDWRITTEN_ONLY".equals(declaredSource));
+        // Treat an explicit NONE/HANDWRITTEN_ONLY classification as a safety signal:
+        // never persist an answer value that conflicts with the model's own classification.
+        String answer = modelDeclaredNoPrintedAnswer ? ""
+                : (StringUtils.hasText(correctAnswer) ? correctAnswer : embeddedAnswer.toString());
+        String parsedExplanation = firstNonBlank(explanation, embeddedExplanation.toString());
+        String source = StringUtils.hasText(answer) ? "PRINTED" : declaredSource;
+        return new RecognizedContent(question.toString(), answer, parsedExplanation, source);
+    }
+
+    private void appendSection(String section, String value, StringBuilder question,
+                               StringBuilder answer, StringBuilder explanation) {
+        String trimmed = value == null ? "" : value.trim();
+        if (trimmed.isEmpty()) return;
+        StringBuilder target = switch (section) {
+            case "answer" -> answer;
+            case "explanation" -> explanation;
+            default -> question;
+        };
+        if (target.length() > 0) target.append('\n');
+        target.append(trimmed);
+    }
+
+    private boolean isExplanationLabel(String label) {
+        return "答案解析".equals(label) || "解析".equals(label) || "解题思路".equals(label);
+    }
+
+    private String firstText(JsonNode node, String... fieldNames) {
+        for (String field : fieldNames) {
+            JsonNode value = node.path(field);
+            if (value.isTextual() && StringUtils.hasText(value.asText())) return value.asText();
+        }
+        return "";
+    }
+
+    private String firstNonBlank(String primary, String fallback) {
+        return StringUtils.hasText(primary) ? primary : fallback;
+    }
+
+    private String normalizeAnswerSource(String value) {
+        String source = value == null ? "" : value.trim().toUpperCase();
+        return switch (source) {
+            case "PRINTED", "NONE", "HANDWRITTEN_ONLY" -> source;
+            default -> "NONE";
+        };
+    }
+
+    private String stripCodeFence(String value) {
+        return value == null ? "" : value.trim()
+                .replaceAll("(?s)^```(?:json)?\\s*|\\s*```$", "").trim();
+    }
+
+    private String normalizeAnswerField(String value, boolean explanation) {
+        String normalized = normalizeText(value);
+        String label = explanation
+                ? "(?:答案解析|解析|解题思路)"
+                : "(?:正确答案|参考答案|标准答案|答案)";
+        return normalized.replaceFirst("(?s)^\\*{0,2}" + label + "\\*{0,2}\\s*[:：=]\\s*", "").trim();
     }
 
     private JsonNode callDeepSeekVision(String imageDataUrl) {
@@ -281,5 +410,12 @@ public class QuestionImageRecognitionService {
             return "image/jpeg";
         }
         return null;
+    }
+
+    private record RecognizedContent(String questionText, String correctAnswer,
+                                     String explanation, String answerSource) {
+        private static RecognizedContent empty() {
+            return new RecognizedContent("", "", "", "NONE");
+        }
     }
 }
