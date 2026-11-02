@@ -136,6 +136,18 @@ public class QuestionService {
     }
 
     @Transactional
+    public QuestionRecord unarchive(String userId, String id) {
+        QuestionRecord current = require(id, userId);
+        if (!"ARCHIVED".equals(current.masteryState())) {
+            throw ApiException.badRequest("这条错题当前未归档。");
+        }
+        if (!questions.unarchive(id, userId)) {
+            throw ApiException.conflict("错题状态已变化，请刷新后重试。");
+        }
+        return require(id, userId);
+    }
+
+    @Transactional
     public QuestionRecord restore(String userId, String id) {
         QuestionRecord deleted = questions.findOwnedIncludingDeleted(id, userId);
         if (deleted == null) throw ApiException.notFound("回收站中没有这条错题。");

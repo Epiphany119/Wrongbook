@@ -52,12 +52,22 @@ public class QuestionRepository {
 
     public List<QuestionRecord> list(String ownerId, QuestionFilter filter, int page, int pageSize, String sort) {
         SqlFilter sql = buildFilter(ownerId, filter, false);
-        String order = switch (sort == null ? "" : sort.toUpperCase()) {
+        String normalizedSort = sort == null ? "" : sort.toUpperCase();
+        boolean relevanceSort = "RELEVANCE".equals(normalizedSort) && filter != null
+                && notBlank(filter.keyword()) && filter.keyword().trim().length() >= 2;
+        String order = switch (normalizedSort) {
             case "DUE_SOON" -> "q.next_review_at ASC, q.created_at DESC";
             case "MOST_WRONG" -> "(SELECT COUNT(*) FROM review_events re WHERE re.question_id=q.id AND re.result IN ('INCORRECT','UNCERTAIN')) DESC, q.updated_at DESC";
+            case "RELEVANCE" -> relevanceSort
+                    ? "MATCH(q.question_text, q.own_answer, q.correct_answer, q.correction, q.explanation, q.error_reason, q.source, q.question_type) "
+                    + "AGAINST (? IN NATURAL LANGUAGE MODE) DESC, q.created_at DESC"
+                    : "q.created_at DESC";
             default -> "q.created_at DESC";
         };
         List<Object> args = new ArrayList<>(sql.args());
+        if (relevanceSort) {
+            args.add(filter.keyword().trim());
+        }
         args.add(pageSize);
         args.add((page - 1) * pageSize);
         return jdbc.query(SELECT_COLUMNS + sql.where() + " ORDER BY " + order + " LIMIT ? OFFSET ?",
@@ -133,6 +143,22 @@ public class QuestionRepository {
                 + "WHERE id=? AND owner_id=? AND deleted_at IS NULL", id, ownerId);
     }
 
+    public boolean unarchive(String id, String ownerId) {
+        return jdbc.update("""
+                UPDATE question_records
+                SET mastery_state=CASE
+                        WHEN consecutive_correct >= 3 THEN 'MASTERED'
+                        WHEN EXISTS (
+                            SELECT 1 FROM review_events r
+                            WHERE r.question_id=question_records.id AND r.owner_id=question_records.owner_id
+                        ) THEN 'REVIEW'
+                        ELSE 'NEW'
+                    END,
+                    updated_at=NOW(3), version=version+1
+                WHERE id=? AND owner_id=? AND mastery_state='ARCHIVED' AND deleted_at IS NULL
+                """, id, ownerId) == 1;
+    }
+
     public boolean owns(String id, String ownerId) {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM question_records WHERE id=? AND owner_id=? AND deleted_at IS NULL",
@@ -150,9 +176,51 @@ public class QuestionRepository {
         }
         if (filter != null) {
             if (notBlank(filter.keyword())) {
-                where.append(" AND (q.question_text LIKE ? OR q.own_answer LIKE ?)");
-                args.add("%" + filter.keyword().trim() + "%");
-                args.add("%" + filter.keyword().trim() + "%");
+                String keyword = filter.keyword().trim();
+                if (keyword.length() >= 2) {
+                    where.append("""
+                             AND (
+                                MATCH(q.question_text, q.own_answer, q.correct_answer, q.correction,
+                                      q.explanation, q.error_reason, q.source, q.question_type)
+                                    AGAINST (? IN NATURAL LANGUAGE MODE) > 0
+                                OR CAST(q.tags AS CHAR) LIKE ?
+                                OR EXISTS (
+                                    SELECT 1 FROM chapters search_chapter
+                                    WHERE search_chapter.id=q.chapter_id AND search_chapter.name LIKE ?
+                                )
+                                OR EXISTS (
+                                    SELECT 1 FROM knowledge_points search_point
+                                    WHERE JSON_CONTAINS(q.knowledge_point_ids, JSON_QUOTE(search_point.id))
+                                      AND search_point.name LIKE ?
+                                      AND (search_point.owner_id IS NULL OR search_point.owner_id=q.owner_id)
+                                )
+                             )
+                            """);
+                    args.add(keyword);
+                    args.add("%" + keyword + "%");
+                    args.add("%" + keyword + "%");
+                    args.add("%" + keyword + "%");
+                } else {
+                    String like = "%" + keyword + "%";
+                    where.append("""
+                             AND (
+                                q.question_text LIKE ? OR q.own_answer LIKE ? OR q.correct_answer LIKE ?
+                                OR q.correction LIKE ? OR q.explanation LIKE ? OR q.error_reason LIKE ?
+                                OR q.source LIKE ? OR q.question_type LIKE ? OR CAST(q.tags AS CHAR) LIKE ?
+                                OR EXISTS (
+                                    SELECT 1 FROM chapters search_chapter
+                                    WHERE search_chapter.id=q.chapter_id AND search_chapter.name LIKE ?
+                                )
+                                OR EXISTS (
+                                    SELECT 1 FROM knowledge_points search_point
+                                    WHERE JSON_CONTAINS(q.knowledge_point_ids, JSON_QUOTE(search_point.id))
+                                      AND search_point.name LIKE ?
+                                      AND (search_point.owner_id IS NULL OR search_point.owner_id=q.owner_id)
+                                )
+                             )
+                            """);
+                    for (int i = 0; i < 11; i++) args.add(like);
+                }
             }
             if (notBlank(filter.subjectId())) { where.append(" AND q.subject_id=?"); args.add(filter.subjectId()); }
             if (notBlank(filter.chapterId())) { where.append(" AND q.chapter_id=?"); args.add(filter.chapterId()); }

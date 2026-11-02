@@ -88,6 +88,11 @@ public class QuestionController {
         return service.archive(userId, id);
     }
 
+    @PostMapping("/questions/{id}/unarchive")
+    public QuestionRecord unarchive(@RequestAttribute("userId") String userId, @PathVariable String id) {
+        return service.unarchive(userId, id);
+    }
+
     @PostMapping("/questions/{id}/restore")
     public QuestionRecord restore(@RequestAttribute("userId") String userId, @PathVariable String id) {
         return service.restore(userId, id);

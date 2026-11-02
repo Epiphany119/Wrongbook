@@ -101,7 +101,9 @@ CREATE TABLE IF NOT EXISTS question_records (
     KEY idx_question_owner_state (owner_id, mastery_state, deleted_at),
     KEY idx_question_owner_due (owner_id, next_review_at),
     KEY idx_question_owner_subject (owner_id, subject_id),
-    FULLTEXT KEY ft_question_text (question_text),
+    FULLTEXT KEY ft_question_search
+        (question_text, own_answer, correct_answer, correction, explanation, error_reason, source, question_type)
+        WITH PARSER ngram,
     CONSTRAINT fk_question_owner FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT fk_question_subject FOREIGN KEY (subject_id) REFERENCES subjects(id),
     CONSTRAINT fk_question_chapter FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE SET NULL
