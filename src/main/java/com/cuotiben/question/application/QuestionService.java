@@ -182,7 +182,8 @@ public class QuestionService {
                 clean(command.idempotencyKey()), command.questionText().trim(), clean(command.ownAnswer()),
                 clean(command.correctAnswer()), clean(command.correction()), clean(command.explanation()),
                 command.subjectId(), clean(command.chapterId()),
-                json.write(command.knowledgePointIds() == null ? List.of() : command.knowledgePointIds()),
+                json.write(command.knowledgePointIds() == null ? List.of() : command.knowledgePointIds().stream()
+                        .filter(pointId -> pointId != null && !pointId.isBlank()).map(String::trim).distinct().toList()),
                 json.write(command.tags() == null ? List.of() : command.tags().stream()
                         .filter(tag -> tag != null && !tag.isBlank()).map(String::trim).distinct().limit(20).toList()),
                 clean(command.errorReason()), clean(command.source()), date, command.difficulty(),
@@ -200,17 +201,17 @@ public class QuestionService {
                     """, Integer.class, command.chapterId(), command.subjectId(), userId);
             if (chapterCount == null || chapterCount == 0) throw ApiException.badRequest("所选章节与学科不匹配。");
         }
-        List<String> pointIds = json.readStrings(command.knowledgePointIdsJson());
-        if (!pointIds.isEmpty()) {
+        List<String> uniquePointIds = json.readStrings(command.knowledgePointIdsJson()).stream().distinct().toList();
+        if (!uniquePointIds.isEmpty()) {
             if (command.chapterId() == null) throw ApiException.badRequest("选择知识点前请先选择章节。");
-            String placeholders = String.join(",", java.util.Collections.nCopies(pointIds.size(), "?"));
+            String placeholders = String.join(",", java.util.Collections.nCopies(uniquePointIds.size(), "?"));
             List<Object> args = new java.util.ArrayList<>();
             args.add(command.chapterId());
-            args.addAll(pointIds.stream().distinct().toList());
+            args.addAll(uniquePointIds);
             args.add(userId);
             Integer pointCount = jdbc.queryForObject("SELECT COUNT(*) FROM knowledge_points WHERE chapter_id=? AND id IN ("
                     + placeholders + ") AND (owner_id IS NULL OR owner_id=?)", Integer.class, args.toArray());
-            if (pointCount == null || pointCount != pointIds.stream().distinct().count()) {
+            if (pointCount == null || pointCount != uniquePointIds.size()) {
                 throw ApiException.badRequest("知识点与所选章节不匹配。");
             }
         }

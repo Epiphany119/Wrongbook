@@ -62,13 +62,20 @@ public class ProfileService {
         String nickname = command.nickname() == null ? "学生" : command.nickname().trim();
         if (nickname.isBlank()) nickname = "学生";
         if (nickname.length() > 40) throw ApiException.badRequest("昵称不能超过40个字符。");
+        String grade = blankToNull(command.grade());
+        String semester = blankToNull(command.semester());
+        String textbookVersion = blankToNull(command.textbookVersion());
+        if (grade != null && grade.length() > 30) throw ApiException.badRequest("年级不能超过30个字符。");
+        if (semester != null && semester.length() > 30) throw ApiException.badRequest("学期不能超过30个字符。");
+        if (textbookVersion != null && textbookVersion.length() > 100) {
+            throw ApiException.badRequest("教材版本不能超过100个字符。");
+        }
         jdbc.update("""
                 UPDATE users SET nickname = ?, grade = ?, semester = ?, textbook_version = ?,
-                    preferred_subjects = ?, updated_at = NOW(3)
+                    preferred_subjects = CAST(? AS JSON), updated_at = NOW(3)
                 WHERE id = ?
                 """,
-                nickname, blankToNull(command.grade()), blankToNull(command.semester()),
-                blankToNull(command.textbookVersion()), json.write(command.preferredSubjects() == null
+                nickname, grade, semester, textbookVersion, json.write(command.preferredSubjects() == null
                         ? List.of() : command.preferredSubjects()), userId);
         return get(userId);
     }
@@ -86,8 +93,8 @@ public class ProfileService {
                         ORDER BY created_at DESC
                         """, userId),
                 "reviewHistory", jdbc.queryForList("""
-                        SELECT r.id, r.question_id, r.result, r.confidence, r.duration_seconds, r.occurred_at,
-                               r.next_review_at, r.policy_version
+                        SELECT r.id, r.question_id, r.result, r.mastery_rating, r.confidence, r.duration_seconds,
+                               r.occurred_at, r.next_review_at, r.policy_version
                         FROM review_events r JOIN question_records q ON q.id = r.question_id
                         WHERE q.owner_id = ? ORDER BY r.occurred_at DESC
                         """, userId),

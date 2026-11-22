@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
     grade VARCHAR(30) NULL,
     semester VARCHAR(30) NULL,
     textbook_version VARCHAR(100) NULL,
+    avatar_storage_key VARCHAR(120) NULL,
+    avatar_mime_type VARCHAR(80) NULL,
     preferred_subjects JSON NOT NULL DEFAULT (JSON_ARRAY()),
     created_at DATETIME(3) NOT NULL,
     updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
