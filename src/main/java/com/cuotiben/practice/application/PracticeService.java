@@ -32,8 +32,14 @@ public class PracticeService {
 
     @Transactional
     public Map<String, Object> start(String userId, PracticeCommand command) {
-        PracticeCommand safe = command == null ? new PracticeCommand(null, null, null, null, false, 10, null) : command;
+        PracticeCommand safe = command == null
+                ? new PracticeCommand("history", null, null, null, false, 10, null, "ALL")
+                : command;
         int limit = Math.max(1, Math.min(50, safe.limit() == null ? 10 : safe.limit()));
+        String subjectId = (safe.subjectId() == null || safe.subjectId().isBlank()) ? "history" : safe.subjectId().trim();
+        String scope = safe.scope() == null ? "" : safe.scope().trim().toUpperCase();
+        boolean dueOnly = Boolean.TRUE.equals(safe.dueOnly()) || "DUE".equals(scope);
+        boolean recentOnly = "RECENT_7D".equals(scope);
         List<QuestionRecord> selected;
         if (safe.questionId() != null && !safe.questionId().isBlank()) {
             QuestionRecord target = questions.findOwned(safe.questionId(), userId);
@@ -41,8 +47,8 @@ public class PracticeService {
             if ("ARCHIVED".equals(target.masteryState())) throw ApiException.conflict("已归档的错题不能练习。");
             selected = List.of(target);
         } else {
-            QuestionFilter filter = new QuestionFilter(null, safe.subjectId(), safe.chapterId(), null, null,
-                    safe.knowledgePointId(), null, safe.errorReason(), null, safe.dueOnly(), true);
+            QuestionFilter filter = new QuestionFilter(null, subjectId, safe.chapterId(), null, null,
+                    safe.knowledgePointId(), null, safe.errorReason(), null, dueOnly, recentOnly);
             selected = questions.list(userId, filter, 1, limit, "DUE_SOON");
         }
         if (selected.isEmpty()) return Map.of("sessionId", "", "totalCount", 0, "items", List.of());
@@ -50,11 +56,12 @@ public class PracticeService {
         String sessionId = UUID.randomUUID().toString();
         List<String> ids = selected.stream().map(QuestionRecord::id).toList();
         Map<String, Object> conditions = new LinkedHashMap<>();
-        conditions.put("subjectId", safe.subjectId());
+        conditions.put("subjectId", subjectId);
         conditions.put("chapterId", safe.chapterId());
         conditions.put("knowledgePointId", safe.knowledgePointId());
         conditions.put("errorReason", safe.errorReason());
-        conditions.put("dueOnly", safe.dueOnly());
+        conditions.put("dueOnly", dueOnly);
+        conditions.put("scope", scope.isEmpty() ? (dueOnly ? "DUE" : "ALL") : scope);
         conditions.put("questionId", safe.questionId());
         jdbc.update("""
                 INSERT INTO practice_sessions
@@ -131,7 +138,7 @@ public class PracticeService {
     }
 
     public record PracticeCommand(String subjectId, String chapterId, String knowledgePointId,
-                                  String errorReason, Boolean dueOnly, Integer limit, String questionId) {}
+                                  String errorReason, Boolean dueOnly, Integer limit, String questionId, String scope) {}
     public record AnswersCommand(List<AnswerCommand> answers) {}
     public record AnswerCommand(String questionId, Integer rating, Integer durationSeconds) {}
     public record PracticeQuestion(String id, String questionText, String subjectName, String chapterName,

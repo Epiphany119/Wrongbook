@@ -78,6 +78,59 @@ public class DashboardService {
             trend.put("accuracyPercent", samples == 0 ? null : Math.round(right * 1000.0 / samples) / 10.0);
             return trend;
         }).toList());
+
+        int totalActive = number("""
+                SELECT COUNT(*) FROM question_records
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL AND mastery_state <> 'ARCHIVED'
+                """, userId);
+        int masteredCount = number("""
+                SELECT COUNT(*) FROM question_records
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL AND mastery_state = 'MASTERED'
+                """, userId);
+        int reviewingCount = number("""
+                SELECT COUNT(*) FROM question_records
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL AND mastery_state = 'REVIEW'
+                """, userId);
+        int newCount = number("""
+                SELECT COUNT(*) FROM question_records
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL AND mastery_state = 'NEW'
+                """, userId);
+        int archivedCount = number("""
+                SELECT COUNT(*) FROM question_records
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL AND mastery_state = 'ARCHIVED'
+                """, userId);
+
+        Map<String, Object> masteryBreakdown = new LinkedHashMap<>();
+        masteryBreakdown.put("totalActive", totalActive);
+        masteryBreakdown.put("newCount", newCount);
+        masteryBreakdown.put("reviewCount", reviewingCount);
+        masteryBreakdown.put("masteredCount", masteredCount);
+        masteryBreakdown.put("archivedCount", archivedCount);
+        masteryBreakdown.put("masteryRatePercent", totalActive == 0 ? 0 : Math.round(masteredCount * 100.0 / totalActive));
+        result.put("masteryBreakdown", masteryBreakdown);
+
+        result.put("errorReasonStats", jdbc.queryForList("""
+                SELECT error_reason AS reason, COUNT(*) AS count
+                FROM question_records
+                WHERE owner_id=? AND subject_id='history' AND deleted_at IS NULL
+                  AND mastery_state <> 'ARCHIVED' AND error_reason IS NOT NULL AND error_reason <> ''
+                GROUP BY error_reason
+                ORDER BY count DESC, error_reason ASC
+                LIMIT 5
+                """, userId));
+
+        result.put("weakChapters", jdbc.queryForList("""
+                SELECT COALESCE(c.name, '未分类章节') AS chapterName, COUNT(*) AS count,
+                       SUM(CASE WHEN q.mastery_state = 'MASTERED' THEN 1 ELSE 0 END) AS masteredCount
+                FROM question_records q
+                LEFT JOIN chapters c ON c.id = q.chapter_id
+                WHERE q.owner_id=? AND q.subject_id='history' AND q.deleted_at IS NULL
+                  AND q.mastery_state <> 'ARCHIVED'
+                GROUP BY COALESCE(c.name, '未分类章节')
+                ORDER BY count DESC, chapterName ASC
+                LIMIT 5
+                """, userId));
+
         return result;
     }
 
