@@ -13,14 +13,24 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 /**
- * 历史错题专项组卷导出服务：使用纯 JDK 生成可直接在 Word / WPS / 微信中预览和打印的 .docx 试卷。
+ * 历史错题专项组卷导出服务：
+ * 自动将包含多道小题的拍照错题拆分为独立题目，并按 1..N 全局连续编号，
+ * 同时确保参考答案与解析与每道小题严格一一对应。
  */
 @Service
 public class PracticePaperService {
+    private static final Pattern QUESTION_LINE_MARKER = Pattern.compile(
+            "^(?:\\*\\*)?(?:第\\s*)?(\\d{1,3})\\s*(?:题)?[.、．:：)）](?:\\*\\*)?\\s*(.*)$");
+    private static final Pattern EMBEDDED_ANSWER_HEAD = Pattern.compile(
+            "^(?:✅\\s*)?(?:答案解析|解题思路|正确答案|参考答案|标准答案|答案|解析)(?:\\s*[:：=]|(?:是|为)(?!什么|如何|怎样|为什么|是否|哪|几|谁)|\\s+)");
+    private static final Pattern OPTION_LINE = Pattern.compile("^(?:\\*\\*)?[A-DＡ-Ｄ][.、．)）]\\s*.*$");
+
     private static final String CONTENT_TYPES_XML = """
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -55,7 +65,12 @@ public class PracticePaperService {
             throw ApiException.badRequest("没有找到可用于组卷的历史错题。");
         }
 
-        String documentXml = buildDocumentXml(title, selected, includeAnswers);
+        List<PaperItem> flattenedItems = flattenQuestions(selected);
+        if (flattenedItems.isEmpty()) {
+            throw ApiException.badRequest("没有找到可用于组卷的历史错题。");
+        }
+
+        String documentXml = buildDocumentXml(title, flattenedItems, includeAnswers);
         byte[] bytes = packageDocx(documentXml);
         String fileName = "历史错题专项卷_" + LocalDate.now() + ".docx";
         return new GeneratedPaper(fileName, bytes);
@@ -78,46 +93,189 @@ public class PracticePaperService {
         return questions.list(userId, filter, 1, limit, "DUE_SOON");
     }
 
-    private String buildDocumentXml(String title, List<QuestionRecord> list, boolean includeAnswers) {
-        StringBuilder body = new StringBuilder();
-        body.append(paragraph(title, 36, true, "center", 120));
-        body.append(paragraph("日期：" + LocalDate.now() + "    共 " + list.size() + " 题    姓名：____________    得分：________", 20, false, "center", 260));
+    private List<PaperItem> flattenQuestions(List<QuestionRecord> records) {
+        List<PaperItem> result = new ArrayList<>();
+        for (QuestionRecord record : records) {
+            List<RawBlock> blocks = splitQuestionBlocks(stripMarkdown(record.questionText()));
+            List<String> expectedNumbers = blocks.stream()
+                    .map(RawBlock::originalNumber)
+                    .filter(num -> num != null && !num.isBlank())
+                    .toList();
 
-        for (int i = 0; i < list.size(); i++) {
-            QuestionRecord q = list.get(i);
-            StringBuilder meta = new StringBuilder("第 " + (i + 1) + " 题");
-            if (q.questionType() != null && !q.questionType().isBlank()) meta.append("  [").append(q.questionType()).append("]");
-            if (q.chapterName() != null && !q.chapterName().isBlank()) meta.append("  ").append(q.chapterName());
-            body.append(paragraph(meta.toString(), 24, true, "left", 80));
+            List<String> splitAnswers = blocks.size() > 1
+                    ? extractByExpectedNumbers(stripMarkdown(record.correctAnswer()), expectedNumbers)
+                    : null;
+            List<String> splitExplanations = blocks.size() > 1
+                    ? extractByExpectedNumbers(stripMarkdown(record.explanation()), expectedNumbers)
+                    : null;
+            List<String> splitCorrections = blocks.size() > 1
+                    ? extractByExpectedNumbers(stripMarkdown(record.correction()), expectedNumbers)
+                    : null;
 
-            String cleanQuestion = stripMarkdown(q.questionText());
-            for (String line : cleanQuestion.split("\\r?\\n")) {
-                if (!line.isBlank()) {
-                    body.append(paragraph(line.trim(), 22, false, "left", 60));
+            for (int i = 0; i < blocks.size(); i++) {
+                RawBlock block = blocks.get(i);
+                List<String> lines = block.lines().stream().filter(line -> !line.isBlank()).toList();
+                if (lines.isEmpty()) continue;
+
+                boolean hasOptions = lines.stream().anyMatch(line -> OPTION_LINE.matcher(line).matches());
+                String answer;
+                if (blocks.size() == 1) {
+                    answer = stripLeadingNumber(stripMarkdown(record.correctAnswer()), block.originalNumber());
+                } else {
+                    answer = splitAnswers != null && i < splitAnswers.size() ? splitAnswers.get(i) : "";
+                }
+
+                String explanation;
+                if (blocks.size() == 1) {
+                    explanation = stripLeadingNumber(stripMarkdown(record.explanation()), block.originalNumber());
+                } else {
+                    explanation = splitExplanations != null && i < splitExplanations.size() ? splitExplanations.get(i) : "";
+                }
+
+                String correction;
+                if (blocks.size() == 1) {
+                    correction = stripLeadingNumber(stripMarkdown(record.correction()), block.originalNumber());
+                } else {
+                    correction = splitCorrections != null && i < splitCorrections.size() ? splitCorrections.get(i) : "";
+                }
+
+                result.add(new PaperItem(
+                        lines,
+                        hasOptions,
+                        answer,
+                        explanation,
+                        correction,
+                        record.errorReason(),
+                        record.questionType(),
+                        record.chapterName()
+                ));
+            }
+        }
+        return result;
+    }
+
+    private List<RawBlock> splitQuestionBlocks(String source) {
+        String[] rawLines = source.replace('\r', '\n').split("\\n");
+        List<String> lead = new ArrayList<>();
+        List<RawBlock> blocks = new ArrayList<>();
+        String currentNum = null;
+        List<String> currentLines = null;
+
+        for (String raw : rawLines) {
+            String line = raw.trim();
+            if (line.isEmpty()) continue;
+            Matcher matcher = QUESTION_LINE_MARKER.matcher(line);
+            if (matcher.matches() && !EMBEDDED_ANSWER_HEAD.matcher(matcher.group(2)).find()) {
+                if (currentLines != null) {
+                    blocks.add(new RawBlock(currentNum, currentLines));
+                }
+                currentNum = matcher.group(1);
+                currentLines = new ArrayList<>();
+                String stem = matcher.group(2).trim();
+                if (!stem.isEmpty()) currentLines.add(stem);
+            } else if (currentLines != null) {
+                currentLines.add(line);
+            } else {
+                lead.add(line);
+            }
+        }
+        if (currentLines != null) {
+            blocks.add(new RawBlock(currentNum, currentLines));
+        }
+        if (blocks.isEmpty()) {
+            return List.of(new RawBlock(null, lead));
+        }
+        if (!lead.isEmpty()) {
+            List<String> merged = new ArrayList<>(lead);
+            merged.addAll(blocks.get(0).lines());
+            blocks.set(0, new RawBlock(blocks.get(0).originalNumber(), merged));
+        }
+        return blocks;
+    }
+
+    private List<String> extractByExpectedNumbers(String source, List<String> expectedNumbers) {
+        if (source == null || source.isBlank() || expectedNumbers.isEmpty()) return null;
+        String text = source.replace('\r', '\n').trim();
+        int[] starts = new int[expectedNumbers.size()];
+        int[] bodyStarts = new int[expectedNumbers.size()];
+        int searchFrom = 0;
+        int matchedCount = 0;
+        for (int i = 0; i < expectedNumbers.size(); i++) {
+            String num = Pattern.quote(expectedNumbers.get(i));
+            Pattern p = Pattern.compile("(?:^|[\\s。；;！!？?,，])(?:第\\s*)?" + num + "\\s*(?:题)?\\s*[.、．:：)）]\\s*");
+            Matcher m = p.matcher(text);
+            if (m.find(searchFrom)) {
+                starts[i] = m.start();
+                bodyStarts[i] = m.end();
+                searchFrom = m.end();
+                matchedCount++;
+            } else {
+                starts[i] = -1;
+                bodyStarts[i] = -1;
+            }
+        }
+        if (matchedCount == 0) return null;
+        List<String> result = new ArrayList<>(expectedNumbers.size());
+        for (int i = 0; i < expectedNumbers.size(); i++) {
+            if (bodyStarts[i] < 0) {
+                result.add("");
+                continue;
+            }
+            int end = text.length();
+            for (int j = i + 1; j < expectedNumbers.size(); j++) {
+                if (starts[j] >= 0) {
+                    end = starts[j];
+                    break;
                 }
             }
-            body.append(paragraph("作答区：", 20, false, "left", 240));
+            result.add(text.substring(bodyStarts[i], end).trim());
+        }
+        return result;
+    }
+
+    private String stripLeadingNumber(String text, String originalNumber) {
+        if (text == null || text.isBlank()) return "";
+        if (originalNumber == null || originalNumber.isBlank()) return text.trim();
+        String num = Pattern.quote(originalNumber);
+        return text.trim().replaceFirst("^(?:第\\s*)?" + num + "\\s*(?:题)?\\s*[.、．:：)）]\\s*", "").trim();
+    }
+
+    private String buildDocumentXml(String title, List<PaperItem> items, boolean includeAnswers) {
+        StringBuilder body = new StringBuilder();
+        body.append(paragraph(title, 36, true, "center", 120));
+        body.append(paragraph("日期：" + LocalDate.now() + "    共 " + items.size() + " 题    姓名：____________    得分：________", 20, false, "center", 260));
+
+        for (int i = 0; i < items.size(); i++) {
+            PaperItem item = items.get(i);
+            int globalNum = i + 1;
+            List<String> lines = item.lines();
+            body.append(paragraph(globalNum + ". " + lines.get(0), 22, false, "left", 60));
+            for (int j = 1; j < lines.size(); j++) {
+                body.append(paragraph(lines.get(j), 21, false, "left", j == lines.size() - 1 ? 140 : 40));
+            }
+            if (!item.hasOptions()) {
+                body.append(paragraph("作答区：", 20, false, "left", 240));
+            } else if (lines.size() == 1) {
+                body.append(paragraph("", 20, false, "left", 100));
+            }
         }
 
         if (includeAnswers) {
             body.append("<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>");
             body.append(paragraph("参考答案与解析", 32, true, "center", 200));
-            for (int i = 0; i < list.size(); i++) {
-                QuestionRecord q = list.get(i);
-                body.append(paragraph("第 " + (i + 1) + " 题", 24, true, "left", 60));
-                String answer = q.correctAnswer() != null && !q.correctAnswer().isBlank()
-                        ? stripMarkdown(q.correctAnswer()) : "（暂未录入参考答案）";
-                body.append(paragraph("【参考答案】" + answer, 22, false, "left", 60));
-                if (q.correction() != null && !q.correction().isBlank()) {
-                    body.append(paragraph("【订正思路】" + stripMarkdown(q.correction()), 21, false, "left", 60));
+            for (int i = 0; i < items.size(); i++) {
+                PaperItem item = items.get(i);
+                int globalNum = i + 1;
+                String answer = item.answer() != null && !item.answer().isBlank()
+                        ? item.answer() : "（暂未录入参考答案）";
+                body.append(paragraph(globalNum + ". 【参考答案】" + answer, 22, true, "left", 50));
+                if (item.correction() != null && !item.correction().isBlank()) {
+                    body.append(paragraph("    【订正思路】" + item.correction(), 21, false, "left", 50));
                 }
-                if (q.explanation() != null && !q.explanation().isBlank()) {
-                    body.append(paragraph("【解析】" + stripMarkdown(q.explanation()), 21, false, "left", 60));
-                }
-                if (q.errorReason() != null && !q.errorReason().isBlank()) {
-                    body.append(paragraph("【历史错因】" + q.errorReason(), 20, false, "left", 140));
+                if (item.explanation() != null && !item.explanation().isBlank()) {
+                    body.append(paragraph("    【解析】" + item.explanation(), 21, false, "left", 110));
                 } else {
-                    body.append(paragraph("", 20, false, "left", 100));
+                    body.append(paragraph("", 18, false, "left", 60));
                 }
             }
         }
@@ -181,6 +339,11 @@ public class PracticePaperService {
         zip.write(content.getBytes(StandardCharsets.UTF_8));
         zip.closeEntry();
     }
+
+    private record RawBlock(String originalNumber, List<String> lines) {}
+
+    private record PaperItem(List<String> lines, boolean hasOptions, String answer, String explanation,
+                             String correction, String errorReason, String questionType, String chapterName) {}
 
     public record PaperCommand(String title, List<String> questionIds, String chapterId,
                                String errorReason, Integer limit, Boolean includeAnswers) {}

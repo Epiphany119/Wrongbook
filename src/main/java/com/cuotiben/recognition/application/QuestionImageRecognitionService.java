@@ -35,12 +35,16 @@ public class QuestionImageRecognitionService {
     private static final Pattern SECTION_LABEL = Pattern.compile(
             "(?:#{1,6}\\s*)?\\*{0,2}(?:[【\\[]\\s*)?(答案解析|解题思路|正确答案|参考答案|标准答案|答案|解析)"
                     + "(?:\\s*[】\\]])?\\*{0,2}\\s*(?:[:：=]\\s*\\*{0,2}\\s*|$)");
+    private static final Pattern QUESTION_LINE_MARKER = Pattern.compile(
+            "^(?:\\*\\*)?(?:第\\s*)?(\\d{1,3})\\s*(?:题)?([.、．:：)）])(?:\\*\\*)?\\s*(.*)$");
+    private static final Pattern EMBEDDED_ANSWER_HEAD = Pattern.compile(
+            "^(?:✅\\s*)?(?:答案解析|解题思路|正确答案|参考答案|标准答案|答案|解析)(?:\\s*[:：=]|(?:是|为)(?!什么|如何|怎样|为什么|是否|哪|几|谁)|\\s+)");
     private static final String EXTRACTION_PROMPT = """
             请从图片中识别历史学科题目，并把题目、标准答案、解析以及题型、历史考点标签分别提取。只输出一个合法 JSON 对象，不要 Markdown 代码围栏或额外说明，格式如下：
             {"questionText":"题面 Markdown","correctAnswer":"清晰印刷的标准答案；没有时为空字符串","explanation":"图片中印刷的解析；没有时为空字符串","answerSource":"PRINTED、NONE 或 HANDWRITTEN_ONLY","questionType":"选择题、填空题、材料分析题、简答题、论述题 或 其他","suggestedTags":["1到3个简洁的历史朝代或核心考点标签"]}
-            questionText 只放章节标题、题号、材料、题干和 A-D 选项；不要把答案或解析混在题面中。保留原有题号、换行和选项层级。
-            correctAnswer 只抄录清晰印刷在题目或答案区中的标准答案。多个小题按原题号分行，例如“1. B\\n2. 秦朝”。不要自行推导或补答案。
-            explanation 只抄录图片中明确印刷的解析，不要根据题目自行生成。
+            questionText 只放章节标题、题号、材料、题干和 A-D 选项；不要把答案或解析混在题面中。如果图片中有多道连续题目（例如原卷 16-20 题），请统一按顺序重新编号为从 1 开始（1. 2. 3. 4. 5.），并保留换行和选项层级。
+            correctAnswer 只抄录清晰印刷在题目或答案区中的标准答案。多个小题按重编号后的题号逐行输出（从 1. 开始），例如“1. B\\n2. 秦朝”。不要自行推导或补答案。
+            explanation 只抄录图片中明确印刷的解析，多个小题同样按重编号后的题号逐行输出（从 1. 开始），不要根据题目自行生成。
             questionType 请根据题面形式判断（有 A-D 选项填“选择题”，有历史材料并设问填“材料分析题”，其余填“填空题”“简答题”“论述题”或“其他”）。
             suggestedTags 提取 1 到 3 个简短的历史时期或核心事件/制度标签（如“秦汉时期”“洋务运动”），不要超过 3 个。
             红笔/手写订正、勾叉、批注不作为标准答案。如果答案只有红笔或手写订正，correctAnswer 必须为空字符串且 answerSource 为 HANDWRITTEN_ONLY；没有找到清晰印刷答案时 answerSource 为 NONE；识别到清晰印刷答案时 answerSource 为 PRINTED。
@@ -96,6 +100,10 @@ public class QuestionImageRecognitionService {
         }
         String correctAnswer = normalizeAnswerField(content.correctAnswer(), false);
         String explanation = normalizeAnswerField(content.explanation(), true);
+        RenumberedResult renumbered = renumberFromOne(questionText, correctAnswer, explanation);
+        questionText = renumbered.questionText();
+        correctAnswer = renumbered.correctAnswer();
+        explanation = renumbered.explanation();
         String answerSource = StringUtils.hasText(correctAnswer)
                 ? "PRINTED" : normalizeAnswerSource(content.answerSource());
         String questionType = normalizeQuestionType(content.questionType());
@@ -106,6 +114,90 @@ public class QuestionImageRecognitionService {
         return new QuestionImageRecognitionResponse(true, questionText, questionText, correctAnswer,
                 explanation, answerSource, questionType, suggestedTags, message);
     }
+
+    private RenumberedResult renumberFromOne(String questionText, String correctAnswer, String explanation) {
+        String[] lines = questionText.split("\\n");
+        List<String> originalNumbers = new java.util.ArrayList<>();
+        StringBuilder rewrittenQuestion = new StringBuilder();
+        int nextNumber = 1;
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i];
+            Matcher matcher = QUESTION_LINE_MARKER.matcher(line.trim());
+            if (matcher.matches() && !EMBEDDED_ANSWER_HEAD.matcher(matcher.group(3)).find()) {
+                originalNumbers.add(matcher.group(1));
+                if (i > 0) rewrittenQuestion.append('\n');
+                rewrittenQuestion.append(nextNumber++).append(". ").append(matcher.group(3).trim());
+            } else {
+                if (i > 0) rewrittenQuestion.append('\n');
+                rewrittenQuestion.append(line);
+            }
+        }
+        if (originalNumbers.isEmpty()) {
+            return new RenumberedResult(questionText, correctAnswer, explanation);
+        }
+        String rewrittenAnswer = renumberNumberedField(correctAnswer, originalNumbers);
+        String rewrittenExplanation = renumberNumberedField(explanation, originalNumbers);
+        return new RenumberedResult(rewrittenQuestion.toString(), rewrittenAnswer, rewrittenExplanation);
+    }
+
+    private String renumberNumberedField(String source, List<String> originalNumbers) {
+        if (!StringUtils.hasText(source) || originalNumbers.isEmpty()) return source;
+        List<String> segments = extractByExpectedNumbers(source, originalNumbers);
+        if (segments == null) return source;
+        if (originalNumbers.size() == 1) {
+            return segments.get(0);
+        }
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < segments.size(); i++) {
+            String item = segments.get(i);
+            if (!StringUtils.hasText(item)) continue;
+            if (out.length() > 0) out.append('\n');
+            out.append(i + 1).append(". ").append(item.trim());
+        }
+        return out.length() == 0 ? source : out.toString();
+    }
+
+    private List<String> extractByExpectedNumbers(String source, List<String> expectedNumbers) {
+        String text = source.replace('\r', '\n').trim();
+        if (text.isEmpty() || expectedNumbers.isEmpty()) return null;
+        int[] starts = new int[expectedNumbers.size()];
+        int[] bodyStarts = new int[expectedNumbers.size()];
+        int searchFrom = 0;
+        int matchedCount = 0;
+        for (int i = 0; i < expectedNumbers.size(); i++) {
+            String num = Pattern.quote(expectedNumbers.get(i));
+            Pattern p = Pattern.compile("(?:^|[\\s。；;！!？?,，])(?:第\\s*)?" + num + "\\s*(?:题)?\\s*[.、．:：)）]\\s*");
+            Matcher m = p.matcher(text);
+            if (m.find(searchFrom)) {
+                starts[i] = m.start();
+                bodyStarts[i] = m.end();
+                searchFrom = m.end();
+                matchedCount++;
+            } else {
+                starts[i] = -1;
+                bodyStarts[i] = -1;
+            }
+        }
+        if (matchedCount == 0) return null;
+        List<String> result = new java.util.ArrayList<>(expectedNumbers.size());
+        for (int i = 0; i < expectedNumbers.size(); i++) {
+            if (bodyStarts[i] < 0) {
+                result.add("");
+                continue;
+            }
+            int end = text.length();
+            for (int j = i + 1; j < expectedNumbers.size(); j++) {
+                if (starts[j] >= 0) {
+                    end = starts[j];
+                    break;
+                }
+            }
+            result.add(text.substring(bodyStarts[i], end).trim());
+        }
+        return result;
+    }
+
+    private record RenumberedResult(String questionText, String correctAnswer, String explanation) {}
 
     private RecognizedContent parseModelContent(String modelText) {
         if (!StringUtils.hasText(modelText) || isNoTextNotice(modelText)) {
