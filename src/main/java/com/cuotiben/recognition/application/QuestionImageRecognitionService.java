@@ -36,21 +36,23 @@ public class QuestionImageRecognitionService {
             "(?:#{1,6}\\s*)?\\*{0,2}(?:[【\\[]\\s*)?(答案解析|解题思路|正确答案|参考答案|标准答案|答案|解析)"
                     + "(?:\\s*[】\\]])?\\*{0,2}\\s*(?:[:：=]\\s*\\*{0,2}\\s*|$)");
     private static final Pattern QUESTION_LINE_MARKER = Pattern.compile(
-            "^(?:\\*\\*)?(?:第\\s*)?(\\d{1,3})\\s*(?:题)?([.、．:：)）])(?:\\*\\*)?\\s*(.*)$");
+            "^(?:#{1,6}\\s*|[-+*]\\s+|>\\s*)?(?:\\*\\*)?(?:第\\s*)?(\\d{1,3})\\s*(?:题)?([.、．:：)）])(?:\\*\\*)?\\s*(.*)$");
     private static final Pattern EMBEDDED_ANSWER_HEAD = Pattern.compile(
             "^(?:✅\\s*)?(?:答案解析|解题思路|正确答案|参考答案|标准答案|答案|解析)(?:\\s*[:：=]|(?:是|为)(?!什么|如何|怎样|为什么|是否|哪|几|谁)|\\s+)");
+    private static final Pattern INLINE_NUMBERED_ANSWER = Pattern.compile(
+            "(?:^|[\\s。；;！!？?,，])(?:第\\s*)?(\\d{1,3})\\s*(?:题)?\\s*[.、．:：)）-]\\s*");
     private static final String EXTRACTION_PROMPT = """
-            请从图片中识别历史学科题目，并把题目、标准答案、解析以及题型、历史考点标签分别提取。只输出一个合法 JSON 对象，不要 Markdown 代码围栏或额外说明，格式如下：
-            {"questionText":"题面 Markdown","correctAnswer":"清晰印刷的标准答案；没有时为空字符串","explanation":"图片中印刷的解析；没有时为空字符串","answerSource":"PRINTED、NONE 或 HANDWRITTEN_ONLY","questionType":"选择题、填空题、材料分析题、简答题、论述题 或 其他","suggestedTags":["1到3个简洁的历史朝代或核心考点标签"]}
-            questionText 只放章节标题、题号、材料、题干和 A-D 选项；不要把答案或解析混在题面中。如果图片中有多道连续题目（例如原卷 16-20 题），请统一按顺序重新编号为从 1 开始（1. 2. 3. 4. 5.），并保留换行和选项层级。
-            correctAnswer 只抄录清晰印刷在题目或答案区中的标准答案。多个小题按重编号后的题号逐行输出（从 1. 开始），例如“1. B\\n2. 秦朝”。不要自行推导或补答案。
-            explanation 只抄录图片中明确印刷的解析，多个小题同样按重编号后的题号逐行输出（从 1. 开始），不要根据题目自行生成。
-            questionType 请根据题面形式判断（有 A-D 选项填“选择题”，有历史材料并设问填“材料分析题”，其余填“填空题”“简答题”“论述题”或“其他”）。
-            suggestedTags 提取 1 到 3 个简短的历史时期或核心事件/制度标签（如“秦汉时期”“洋务运动”），不要超过 3 个。
-            红笔/手写订正、勾叉、批注不作为标准答案。如果答案只有红笔或手写订正，correctAnswer 必须为空字符串且 answerSource 为 HANDWRITTEN_ONLY；没有找到清晰印刷答案时 answerSource 为 NONE；识别到清晰印刷答案时 answerSource 为 PRINTED。
-            answerSource 必须与字段一致：correctAnswer 非空时 answerSource 必须为 PRINTED；只有 correctAnswer 为空时才可使用 NONE 或 HANDWRITTEN_ONLY。
-            只能抄录图片里确实出现的印刷内容，不得解题、猜测答案、编造解析、改写或补齐模糊/缺失内容；无法辨认的印刷内容用【无法辨认】标记。
-            如果图片不是练习题/试卷，或没有清晰可录入的题目文字，输出：{"questionText":"NO_QUESTION_TEXT","correctAnswer":"","explanation":"","answerSource":"NONE","questionType":"","suggestedTags":[]}
+            请从图片中识别历史学科题目或参考答案页，并把内容结构化提取。只输出一个合法 JSON 对象，不要 Markdown 代码围栏或额外说明，格式如下：
+            {"contentKind":"QUESTIONS、MIXED、ANSWER_SHEET 或 NONE","questionText":"题面 Markdown（保留原题号，纯答案页时为空字符串）","correctAnswer":"清晰印刷的标准答案（保留原题号，如 30. B\\n31. A；没有时为空字符串）","explanation":"图片中印刷的解析（保留原题号；没有时为空字符串）","answerSource":"PRINTED、NONE 或 HANDWRITTEN_ONLY","questionType":"选择题、填空题、材料分析题、简答题、论述题 或 其他","suggestedTags":["1到3个简洁的历史朝代或核心考点标签"],"answerMap":{"原题号":"对应印刷答案，例如 30: B"}}
+            判定 contentKind 的规则：
+            1. 如果图片主要是参考答案列表/答案汇总页（例如出现“答案”“参考答案”标题以及大量“1.B 2.B 3.A ... 50.B”的编号答案，即使顶部残留一两行题干），请设 contentKind 为 "ANSWER_SHEET"，把图中所有印刷的“原题号->答案”完整提取到 answerMap（键为纯数字字符串如 "30"，值为答案如 "B"），同时按“原题号. 答案”分行填入 correctAnswer，questionText 设为空字符串！
+            2. 如果图片同时包含完整题目和对应答案，设 contentKind 为 "MIXED"，questionText 保留原题号，answerMap 和 correctAnswer 同样保留原题号。
+            3. 如果图片只有题目没有清晰印刷答案，设 contentKind 为 "QUESTIONS"，questionText 必须保留图片原本的题号（例如 30. 31. ... 40.），不要自行改号（后端会统一重排并用于跨页匹配答案）。
+            4. questionText 只放章节标题、原题号、材料、题干和 A-D 选项；不要把答案或解析混在题面中。
+            5. correctAnswer 与 answerMap 只抄录清晰印刷的标准答案；红笔/手写订正、勾叉、批注不作为标准答案（只有手写订正时 answerSource 为 HANDWRITTEN_ONLY 且 correctAnswer 为空）。
+            6. questionType 请根据题面形式判断；suggestedTags 提取 1 到 3 个简短历史时期或核心考点标签（纯答案页可留空数组）。
+            7. 只能抄录图片里确实出现的印刷内容，不得解题、猜测答案或编造解析；无法辨认的印刷内容用【无法辨认】标记。
+            8. 如果图片既不是练习题/试卷，也不是参考答案页，输出：{"contentKind":"NONE","questionText":"NO_QUESTION_TEXT","correctAnswer":"","explanation":"","answerSource":"NONE","questionType":"","suggestedTags":[],"answerMap":{}}
             """;
     private static final Logger log = LoggerFactory.getLogger(QuestionImageRecognitionService.class);
     private final DeepSeekVisionProperties properties;
@@ -94,25 +96,71 @@ public class QuestionImageRecognitionService {
         JsonNode response = callDeepSeekVision(dataUrl);
         String modelText = extractModelText(response);
         RecognizedContent content = parseModelContent(modelText);
-        String questionText = normalizeText(content.questionText());
-        if (!isReadable(questionText)) {
-            return new QuestionImageRecognitionResponse(false, "", "", "", "", "NONE", "", List.of(), UNREADABLE_MESSAGE);
+
+        String rawQuestionText = normalizeText(content.questionText());
+        String rawCorrectAnswer = normalizeAnswerField(content.correctAnswer(), false);
+        String rawExplanation = normalizeAnswerField(content.explanation(), true);
+        Map<String, String> parsedAnswerMap = buildAnswerMap(content.answerMap(), rawCorrectAnswer);
+        if (parsedAnswerMap.isEmpty()) {
+            Map<String, String> fallbackFromRaw = parseGenericNumberedMap(modelText);
+            if (fallbackFromRaw.size() >= 3) {
+                parsedAnswerMap.putAll(fallbackFromRaw);
+            }
         }
-        String correctAnswer = normalizeAnswerField(content.correctAnswer(), false);
-        String explanation = normalizeAnswerField(content.explanation(), true);
-        RenumberedResult renumbered = renumberFromOne(questionText, correctAnswer, explanation);
-        questionText = renumbered.questionText();
-        correctAnswer = renumbered.correctAnswer();
-        explanation = renumbered.explanation();
+        Map<String, String> parsedExplanationMap = parseGenericNumberedMap(rawExplanation);
+
+        boolean questionReadable = isReadable(rawQuestionText);
+        RenumberedResult previewRenumber = questionReadable
+                ? renumberFromOne(rawQuestionText, rawCorrectAnswer, rawExplanation)
+                : new RenumberedResult("", "", "", List.of());
+        int detectedQuestionCount = previewRenumber.originalNumbers().size();
+
+        // 即使答案页顶部残留 1~2 道题干（如第 50 题），只要识别出的编号答案数量明显多于题干数，即判定为纯答案页
+        boolean mostlyAnswerSheet = parsedAnswerMap.size() >= 3
+                && parsedAnswerMap.size() > Math.max(1, detectedQuestionCount) * 2;
+        boolean isAnswerSheet = "ANSWER_SHEET".equals(content.contentKind())
+                || (!questionReadable && !parsedAnswerMap.isEmpty())
+                || mostlyAnswerSheet;
+
+        log.info("Vision parsed: contentKind={}, questionReadable={}, detectedQuestions={}, answerMapSize={}, isAnswerSheet={}",
+                content.contentKind(), questionReadable, detectedQuestionCount, parsedAnswerMap.size(), isAnswerSheet);
+
+        if (isAnswerSheet && !parsedAnswerMap.isEmpty()) {
+            String formattedAnswers = formatNumberedMap(parsedAnswerMap);
+            String msg = "已识别答案页（共 " + parsedAnswerMap.size() + " 条参考答案），将自动按原题号匹配。";
+            return new QuestionImageRecognitionResponse(
+                    true, "ANSWER_SHEET", "", "", formattedAnswers, rawExplanation,
+                    "PRINTED", "", List.of(), List.of(), parsedAnswerMap, parsedExplanationMap, msg);
+        }
+
+        if (!questionReadable) {
+            return new QuestionImageRecognitionResponse(
+                    false, "NONE", "", "", "", "", "NONE", "", List.of(), List.of(), Map.of(), Map.of(), UNREADABLE_MESSAGE);
+        }
+
+        String questionText = previewRenumber.questionText();
+        String correctAnswer = previewRenumber.correctAnswer();
+        String explanation = previewRenumber.explanation();
+        List<String> originalNumbers = previewRenumber.originalNumbers();
+
+        if (!originalNumbers.isEmpty() && parsedAnswerMap.isEmpty() && StringUtils.hasText(rawCorrectAnswer)) {
+            parsedAnswerMap = mapByExpectedNumbers(rawCorrectAnswer, originalNumbers);
+        }
+        if (!originalNumbers.isEmpty() && parsedExplanationMap.isEmpty() && StringUtils.hasText(rawExplanation)) {
+            parsedExplanationMap = mapByExpectedNumbers(rawExplanation, originalNumbers);
+        }
+
         String answerSource = StringUtils.hasText(correctAnswer)
                 ? "PRINTED" : normalizeAnswerSource(content.answerSource());
+        String contentKind = StringUtils.hasText(correctAnswer) ? "MIXED" : "QUESTIONS";
         String questionType = normalizeQuestionType(content.questionType());
         List<String> suggestedTags = content.suggestedTags() == null ? List.of() : content.suggestedTags();
         String message = StringUtils.hasText(correctAnswer)
                 ? "识别完成，已提取题目、参考答案与分类建议，请核对。"
-                : "识别完成，未发现清晰印刷答案；你可以补充，或稍后再填写。";
-        return new QuestionImageRecognitionResponse(true, questionText, questionText, correctAnswer,
-                explanation, answerSource, questionType, suggestedTags, message);
+                : "识别完成，未发现清晰印刷答案；你可以继续拍答案页自动匹配，或手动补充。";
+        return new QuestionImageRecognitionResponse(
+                true, contentKind, questionText, questionText, correctAnswer, explanation,
+                answerSource, questionType, suggestedTags, originalNumbers, parsedAnswerMap, parsedExplanationMap, message);
     }
 
     private RenumberedResult renumberFromOne(String questionText, String correctAnswer, String explanation) {
@@ -133,11 +181,11 @@ public class QuestionImageRecognitionService {
             }
         }
         if (originalNumbers.isEmpty()) {
-            return new RenumberedResult(questionText, correctAnswer, explanation);
+            return new RenumberedResult(questionText, correctAnswer, explanation, List.of());
         }
         String rewrittenAnswer = renumberNumberedField(correctAnswer, originalNumbers);
         String rewrittenExplanation = renumberNumberedField(explanation, originalNumbers);
-        return new RenumberedResult(rewrittenQuestion.toString(), rewrittenAnswer, rewrittenExplanation);
+        return new RenumberedResult(rewrittenQuestion.toString(), rewrittenAnswer, rewrittenExplanation, originalNumbers);
     }
 
     private String renumberNumberedField(String source, List<String> originalNumbers) {
@@ -155,6 +203,66 @@ public class QuestionImageRecognitionService {
             out.append(i + 1).append(". ").append(item.trim());
         }
         return out.length() == 0 ? source : out.toString();
+    }
+
+    private Map<String, String> mapByExpectedNumbers(String source, List<String> expectedNumbers) {
+        List<String> segments = extractByExpectedNumbers(source, expectedNumbers);
+        Map<String, String> map = new java.util.LinkedHashMap<>();
+        if (segments == null) return map;
+        for (int i = 0; i < expectedNumbers.size() && i < segments.size(); i++) {
+            if (StringUtils.hasText(segments.get(i))) {
+                map.put(expectedNumbers.get(i), segments.get(i).trim());
+            }
+        }
+        return map;
+    }
+
+    private Map<String, String> buildAnswerMap(Map<String, String> modelMap, String rawCorrectAnswer) {
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        if (StringUtils.hasText(rawCorrectAnswer)) {
+            result.putAll(parseGenericNumberedMap(rawCorrectAnswer));
+        }
+        if (modelMap != null) {
+            modelMap.forEach((k, v) -> {
+                String cleanKey = k == null ? "" : k.replaceAll("[^0-9]", "");
+                String cleanVal = v == null ? "" : v.trim();
+                if (!cleanKey.isEmpty() && !cleanVal.isEmpty()) {
+                    result.put(cleanKey, cleanVal);
+                }
+            });
+        }
+        return result;
+    }
+
+    private Map<String, String> parseGenericNumberedMap(String source) {
+        Map<String, String> map = new java.util.LinkedHashMap<>();
+        if (!StringUtils.hasText(source)) return map;
+        String text = source.replace('\r', '\n').trim();
+        List<int[]> spans = new java.util.ArrayList<>();
+        List<String> keys = new java.util.ArrayList<>();
+        Matcher matcher = INLINE_NUMBERED_ANSWER.matcher(text);
+        while (matcher.find()) {
+            keys.add(matcher.group(1));
+            spans.add(new int[]{matcher.start(), matcher.end()});
+        }
+        for (int i = 0; i < keys.size(); i++) {
+            int bodyStart = spans.get(i)[1];
+            int bodyEnd = i + 1 < keys.size() ? spans.get(i + 1)[0] : text.length();
+            String val = text.substring(bodyStart, bodyEnd).trim();
+            if (!val.isEmpty()) {
+                map.put(keys.get(i), val);
+            }
+        }
+        return map;
+    }
+
+    private String formatNumberedMap(Map<String, String> map) {
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            if (out.length() > 0) out.append('\n');
+            out.append(entry.getKey()).append(". ").append(entry.getValue());
+        }
+        return out.toString();
     }
 
     private List<String> extractByExpectedNumbers(String source, List<String> expectedNumbers) {
@@ -197,7 +305,7 @@ public class QuestionImageRecognitionService {
         return result;
     }
 
-    private record RenumberedResult(String questionText, String correctAnswer, String explanation) {}
+    private record RenumberedResult(String questionText, String correctAnswer, String explanation, List<String> originalNumbers) {}
 
     private RecognizedContent parseModelContent(String modelText) {
         if (!StringUtils.hasText(modelText) || isNoTextNotice(modelText)) {
@@ -211,6 +319,7 @@ public class QuestionImageRecognitionService {
         try {
             JsonNode root = JSON.readTree(json);
             if (root != null && root.isObject()) {
+                String contentKind = normalizeContentKind(firstText(root, "contentKind", "content_kind", "kind"));
                 String questionText = firstText(root, "questionText", "question_text", "question", "text", "markdown");
                 String answer = firstText(root, "correctAnswer", "correct_answer", "referenceAnswer",
                         "reference_answer", "standardAnswer", "standard_answer", "answerText", "answer_text", "answer");
@@ -218,7 +327,11 @@ public class QuestionImageRecognitionService {
                 String answerSource = firstText(root, "answerSource", "answer_source");
                 String questionType = firstText(root, "questionType", "question_type", "type");
                 List<String> tags = extractTags(root.path("suggestedTags"), root.path("suggested_tags"), root.path("tags"));
-                return splitEmbeddedSections(questionText, answer, explanation, answerSource, questionType, tags);
+                Map<String, String> answerMap = extractStringMap(root.path("answerMap"), root.path("answer_map"), root.path("answers"));
+                if ("ANSWER_SHEET".equals(contentKind)) {
+                    return new RecognizedContent("ANSWER_SHEET", "", answer, explanation, "PRINTED", "", List.of(), answerMap);
+                }
+                return splitEmbeddedSections(contentKind, questionText, answer, explanation, answerSource, questionType, tags, answerMap);
             }
         } catch (IOException ignored) {
             // Keep older/plain-text model responses working while the new prompt uses JSON fields.
@@ -226,12 +339,42 @@ public class QuestionImageRecognitionService {
         if (json.contains("\"questionText\"") || json.startsWith("{")) {
             return RecognizedContent.empty();
         }
-        return splitEmbeddedSections(modelText, "", "", "", "", List.of());
+        return splitEmbeddedSections("QUESTIONS", modelText, "", "", "", "", List.of(), Map.of());
     }
 
-    private RecognizedContent splitEmbeddedSections(String questionText, String correctAnswer,
+    private Map<String, String> extractStringMap(JsonNode... candidates) {
+        Map<String, String> map = new java.util.LinkedHashMap<>();
+        for (JsonNode node : candidates) {
+            if (node != null && node.isObject()) {
+                var fields = node.fields();
+                while (fields.hasNext()) {
+                    var entry = fields.next();
+                    String key = entry.getKey() == null ? "" : entry.getKey().replaceAll("[^0-9]", "");
+                    String val = entry.getValue().asText("").trim();
+                    if (!key.isEmpty() && !val.isEmpty()) {
+                        map.put(key, val);
+                    }
+                }
+                if (!map.isEmpty()) return map;
+            }
+        }
+        return map;
+    }
+
+    private String normalizeContentKind(String value) {
+        if (!StringUtils.hasText(value)) return "QUESTIONS";
+        return switch (value.trim().toUpperCase()) {
+            case "ANSWER_SHEET", "ANSWERS", "ANSWER" -> "ANSWER_SHEET";
+            case "MIXED" -> "MIXED";
+            case "NONE" -> "NONE";
+            default -> "QUESTIONS";
+        };
+    }
+
+    private RecognizedContent splitEmbeddedSections(String contentKind, String questionText, String correctAnswer,
                                                      String explanation, String answerSource,
-                                                     String questionType, List<String> suggestedTags) {
+                                                     String questionType, List<String> suggestedTags,
+                                                     Map<String, String> answerMap) {
         StringBuilder question = new StringBuilder();
         StringBuilder embeddedAnswer = new StringBuilder();
         StringBuilder embeddedExplanation = new StringBuilder();
@@ -259,7 +402,7 @@ public class QuestionImageRecognitionService {
                 : (StringUtils.hasText(correctAnswer) ? correctAnswer : embeddedAnswer.toString());
         String parsedExplanation = firstNonBlank(explanation, embeddedExplanation.toString());
         String source = StringUtils.hasText(answer) ? "PRINTED" : declaredSource;
-        return new RecognizedContent(question.toString(), answer, parsedExplanation, source, questionType, suggestedTags);
+        return new RecognizedContent(contentKind, question.toString(), answer, parsedExplanation, source, questionType, suggestedTags, answerMap);
     }
 
     private List<String> extractTags(JsonNode... candidates) {
@@ -543,11 +686,12 @@ public class QuestionImageRecognitionService {
         return null;
     }
 
-    private record RecognizedContent(String questionText, String correctAnswer,
+    private record RecognizedContent(String contentKind, String questionText, String correctAnswer,
                                      String explanation, String answerSource,
-                                     String questionType, List<String> suggestedTags) {
+                                     String questionType, List<String> suggestedTags,
+                                     Map<String, String> answerMap) {
         private static RecognizedContent empty() {
-            return new RecognizedContent("", "", "", "NONE", "", List.of());
+            return new RecognizedContent("NONE", "", "", "", "NONE", "", List.of(), Map.of());
         }
     }
 }

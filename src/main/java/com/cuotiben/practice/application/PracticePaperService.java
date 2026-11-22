@@ -103,7 +103,7 @@ public class PracticePaperService {
                     .toList();
 
             List<String> splitAnswers = blocks.size() > 1
-                    ? extractByExpectedNumbers(stripMarkdown(record.correctAnswer()), expectedNumbers)
+                    ? splitMultiChoiceAnswers(stripMarkdown(record.correctAnswer()), expectedNumbers, blocks.size())
                     : null;
             List<String> splitExplanations = blocks.size() > 1
                     ? extractByExpectedNumbers(stripMarkdown(record.explanation()), expectedNumbers)
@@ -191,6 +191,25 @@ public class PracticePaperService {
             blocks.set(0, new RawBlock(blocks.get(0).originalNumber(), merged));
         }
         return blocks;
+    }
+
+    private List<String> splitMultiChoiceAnswers(String source, List<String> expectedNumbers, int expectedCount) {
+        List<String> byNumber = extractByExpectedNumbers(source, expectedNumbers);
+        if (byNumber != null) return byNumber;
+        if (source == null || source.isBlank() || expectedCount < 2) return null;
+        String cleaned = source.trim()
+                .replaceFirst("^(?:✅\\s*)?(?:正确答案|参考答案|标准答案|答案)\\s*[:：]\\s*", "")
+                .replaceAll("[\\s,，、;；|/\\-]+", "")
+                .toUpperCase()
+                .replace('Ａ', 'A').replace('Ｂ', 'B').replace('Ｃ', 'C').replace('Ｄ', 'D');
+        if (cleaned.matches("^[A-D]{2,}$")) {
+            List<String> letters = new ArrayList<>(expectedCount);
+            for (int i = 0; i < expectedCount; i++) {
+                letters.add(i < cleaned.length() ? String.valueOf(cleaned.charAt(i)) : "");
+            }
+            return letters;
+        }
+        return null;
     }
 
     private List<String> extractByExpectedNumbers(String source, List<String> expectedNumbers) {
