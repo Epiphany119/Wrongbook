@@ -194,6 +194,8 @@ CREATE TABLE IF NOT EXISTS practice_papers (
     question_ids JSON NOT NULL,
     record_count INT NOT NULL DEFAULT 0,
     question_count INT NOT NULL DEFAULT 0,
+    default_mode VARCHAR(30) NOT NULL DEFAULT 'QUESTIONS_ONLY',
+    used_modes JSON NOT NULL DEFAULT (JSON_ARRAY('QUESTIONS_ONLY')),
     created_at DATETIME(3) NOT NULL,
     updated_at DATETIME(3) NOT NULL,
     KEY idx_practice_papers_owner_time (owner_id, created_at),

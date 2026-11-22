@@ -85,8 +85,9 @@ public class PracticeController {
     public ResponseEntity<byte[]> exportSavedPaper(@RequestAttribute("userId") String userId,
                                                    @PathVariable String id,
                                                    @RequestBody(required = false) PracticePaperService.ExportPaperCommand command) {
-        String mode = command == null ? "WITH_ANSWERS" : command.mode();
-        PracticePaperService.GeneratedPaper paper = paperService.exportSavedPaper(userId, id, mode);
+        String mode = command == null ? null : command.mode();
+        String customTitle = command == null ? null : command.customTitle();
+        PracticePaperService.GeneratedPaper paper = paperService.exportSavedPaper(userId, id, mode, customTitle);
         return docxResponse(paper);
     }
 

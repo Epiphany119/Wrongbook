@@ -16,9 +16,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -26,9 +29,9 @@ import java.util.zip.ZipOutputStream;
 
 /**
  * 历史错题专项组卷与记录管理服务：
- * 1. 支持持久化组卷记录（名称、关联错题 ID 列表、实际小题数）与按名称检索、重命名、删除；
- * 2. 自动拆平多小题并全局 1..N 连续编号；
- * 3. 支持三种打印导出版本：QUESTIONS_ONLY（无答案学生卷）、WITH_ANSWERS（含答案教师版）、ANSWERS_ONLY（纯答案省纸版）。
+ * 1. 仅持久化轻量组卷状态（名称、关联错题 ID、初始版本、已使用版本），不在服务端堆积真实 Word 文件；
+ * 2. 查看/导出时按需拆平多小题并全局 1..N 连续编号，在内存中实时复原 .docx；
+ * 3. 支持三种版本：QUESTIONS_ONLY（学生做题版）、WITH_ANSWERS（老师做题版）、ANSWERS_ONLY（纯答案版）。
  */
 @Service
 public class PracticePaperService {
@@ -69,6 +72,7 @@ public class PracticePaperService {
         if (command == null || command.questionIds() == null || command.questionIds().isEmpty()) {
             throw ApiException.badRequest("请先勾选至少一道历史错题。");
         }
+        ExportMode initialMode = parseRequiredMode(command.mode());
         String title = normalizeTitle(command.title());
         List<String> validIds = new ArrayList<>();
         List<QuestionRecord> selected = new ArrayList<>();
@@ -84,28 +88,65 @@ public class PracticePaperService {
             throw ApiException.badRequest("所选错题不存在或已移入回收站。");
         }
         List<PaperItem> flattened = flattenQuestions(selected);
+        String targetKey = canonicalQuestionKey(validIds);
+
+        // 若同一组错题已存在组卷记录，则融合为同一条记录并追加版本标签，不产生重复记录
+        List<Map<String, Object>> existingRows = jdbc.queryForList("""
+                SELECT id, title, question_ids AS questionIds, default_mode AS defaultMode, used_modes AS usedModes
+                FROM practice_papers WHERE owner_id=? ORDER BY updated_at DESC, created_at DESC
+                """, userId);
+        List<Map<String, Object>> sameSetRows = existingRows.stream()
+                .filter(row -> targetKey.equals(canonicalQuestionKey(json.readStrings(String.valueOf(row.get("questionIds"))))))
+                .toList();
+        if (!sameSetRows.isEmpty()) {
+            String primaryId = String.valueOf(sameSetRows.get(0).get("id"));
+            Set<String> mergedModes = new LinkedHashSet<>();
+            for (Map<String, Object> row : sameSetRows) {
+                mergedModes.addAll(extractUsedModes(row));
+            }
+            mergedModes.add(initialMode.name());
+            jdbc.update("""
+                    UPDATE practice_papers
+                    SET used_modes=CAST(? AS JSON), record_count=?, question_count=?, updated_at=NOW(3)
+                    WHERE id=? AND owner_id=?
+                    """, json.write(new ArrayList<>(mergedModes)), validIds.size(), flattened.size(), primaryId, userId);
+            for (int i = 1; i < sameSetRows.size(); i++) {
+                jdbc.update("DELETE FROM practice_papers WHERE id=? AND owner_id=?",
+                        String.valueOf(sameSetRows.get(i).get("id")), userId);
+            }
+            Map<String, Object> merged = new LinkedHashMap<>(getRecord(userId, primaryId));
+            merged.put("merged", true);
+            return merged;
+        }
+
         String paperId = UUID.randomUUID().toString();
+        List<String> usedModes = List.of(initialMode.name());
         jdbc.update("""
-                INSERT INTO practice_papers (id, owner_id, title, question_ids, record_count, question_count, created_at, updated_at)
-                VALUES (?, ?, ?, CAST(? AS JSON), ?, ?, NOW(3), NOW(3))
-                """, paperId, userId, title, json.write(validIds), validIds.size(), flattened.size());
+                INSERT INTO practice_papers
+                  (id, owner_id, title, question_ids, default_mode, used_modes, record_count, question_count, created_at, updated_at)
+                VALUES (?, ?, ?, CAST(? AS JSON), ?, CAST(? AS JSON), ?, ?, NOW(3), NOW(3))
+                """, paperId, userId, title, json.write(validIds), initialMode.name(), json.write(usedModes), validIds.size(), flattened.size());
         return getRecord(userId, paperId);
     }
 
+    @Transactional
     public List<Map<String, Object>> listRecords(String userId, String keyword) {
+        mergeDuplicateQuestionSets(userId);
         String cleanKeyword = keyword == null ? "" : keyword.trim();
         List<Map<String, Object>> rows;
         if (cleanKeyword.isEmpty()) {
             rows = jdbc.queryForList("""
-                    SELECT id, title, question_ids AS questionIds, record_count AS recordCount,
+                    SELECT id, title, question_ids AS questionIds, default_mode AS defaultMode,
+                           used_modes AS usedModes, record_count AS recordCount,
                            question_count AS questionCount, created_at AS createdAt, updated_at AS updatedAt
-                    FROM practice_papers WHERE owner_id=? ORDER BY created_at DESC LIMIT 100
+                    FROM practice_papers WHERE owner_id=? ORDER BY updated_at DESC, created_at DESC LIMIT 100
                     """, userId);
         } else {
             rows = jdbc.queryForList("""
-                    SELECT id, title, question_ids AS questionIds, record_count AS recordCount,
+                    SELECT id, title, question_ids AS questionIds, default_mode AS defaultMode,
+                           used_modes AS usedModes, record_count AS recordCount,
                            question_count AS questionCount, created_at AS createdAt, updated_at AS updatedAt
-                    FROM practice_papers WHERE owner_id=? AND title LIKE ? ORDER BY created_at DESC LIMIT 100
+                    FROM practice_papers WHERE owner_id=? AND title LIKE ? ORDER BY updated_at DESC, created_at DESC LIMIT 100
                     """, userId, "%" + cleanKeyword + "%");
         }
         return rows.stream().map(this::formatRecordRow).toList();
@@ -113,7 +154,8 @@ public class PracticePaperService {
 
     public Map<String, Object> getRecord(String userId, String paperId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
-                SELECT id, title, question_ids AS questionIds, record_count AS recordCount,
+                SELECT id, title, question_ids AS questionIds, default_mode AS defaultMode,
+                       used_modes AS usedModes, record_count AS recordCount,
                        question_count AS questionCount, created_at AS createdAt, updated_at AS updatedAt
                 FROM practice_papers WHERE id=? AND owner_id=?
                 """, paperId, userId);
@@ -137,12 +179,28 @@ public class PracticePaperService {
         if (deleted != 1) throw ApiException.notFound("组卷记录不存在。");
     }
 
-    public GeneratedPaper exportSavedPaper(String userId, String paperId, String mode) {
+    @Transactional
+    public GeneratedPaper exportSavedPaper(String userId, String paperId, String mode, String customTitle) {
         Map<String, Object> record = getRecord(userId, paperId);
-        String title = String.valueOf(record.get("title"));
+        String savedTitle = String.valueOf(record.get("title"));
+        String effectiveTitle = (customTitle != null && !customTitle.isBlank())
+                ? normalizeTitle(customTitle) : savedTitle;
+        ExportMode defaultMode = resolveModeValue(String.valueOf(record.get("defaultMode")), ExportMode.QUESTIONS_ONLY);
+        ExportMode targetMode = resolveModeValue(mode, defaultMode);
+
+        @SuppressWarnings("unchecked")
+        List<String> usedModes = new ArrayList<>((List<String>) record.get("usedModes"));
+        if (!usedModes.contains(targetMode.name())) {
+            usedModes.add(targetMode.name());
+            jdbc.update("""
+                    UPDATE practice_papers SET used_modes=CAST(? AS JSON), updated_at=NOW(3)
+                    WHERE id=? AND owner_id=?
+                    """, json.write(usedModes), paperId, userId);
+        }
+
         @SuppressWarnings("unchecked")
         List<String> questionIds = (List<String>) record.get("questionIds");
-        return exportDocx(userId, new PaperCommand(title, questionIds, null, null, null, null, mode));
+        return exportDocx(userId, new PaperCommand(effectiveTitle, questionIds, null, null, null, null, targetMode.name()));
     }
 
     public GeneratedPaper exportDocx(String userId, PaperCommand command) {
@@ -166,10 +224,19 @@ public class PracticePaperService {
     }
 
     private Map<String, Object> formatRecordRow(Map<String, Object> row) {
+        String defaultMode = resolveModeValue(
+                row.get("defaultMode") == null ? null : String.valueOf(row.get("defaultMode")),
+                ExportMode.QUESTIONS_ONLY).name();
+        List<String> rawUsed = row.get("usedModes") == null
+                ? List.of() : json.readStrings(String.valueOf(row.get("usedModes")));
+        List<String> usedModes = rawUsed.isEmpty() ? List.of(defaultMode) : rawUsed;
+
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("id", row.get("id"));
         item.put("title", row.get("title"));
         item.put("questionIds", json.readStrings(String.valueOf(row.get("questionIds"))));
+        item.put("defaultMode", defaultMode);
+        item.put("usedModes", usedModes);
         item.put("recordCount", ((Number) row.get("recordCount")).intValue());
         item.put("questionCount", ((Number) row.get("questionCount")).intValue());
         item.put("createdAt", formatTimestamp(row.get("createdAt")));
@@ -193,13 +260,85 @@ public class PracticePaperService {
         return safe.isEmpty() ? "历史错题专项练习卷" : safe;
     }
 
+    private void mergeDuplicateQuestionSets(String userId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT id, question_ids AS questionIds, default_mode AS defaultMode, used_modes AS usedModes
+                FROM practice_papers WHERE owner_id=? ORDER BY updated_at DESC, created_at DESC
+                """, userId);
+        Map<String, List<Map<String, Object>>> groups = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String key = canonicalQuestionKey(json.readStrings(String.valueOf(row.get("questionIds"))));
+            if (key.isEmpty()) continue;
+            groups.computeIfAbsent(key, ignored -> new ArrayList<>()).add(row);
+        }
+        for (List<Map<String, Object>> group : groups.values()) {
+            if (group.size() <= 1) continue;
+            String primaryId = String.valueOf(group.get(0).get("id"));
+            Set<String> mergedModes = new LinkedHashSet<>();
+            for (Map<String, Object> row : group) {
+                mergedModes.addAll(extractUsedModes(row));
+            }
+            jdbc.update("UPDATE practice_papers SET used_modes=CAST(? AS JSON) WHERE id=? AND owner_id=?",
+                    json.write(new ArrayList<>(mergedModes)), primaryId, userId);
+            for (int i = 1; i < group.size(); i++) {
+                jdbc.update("DELETE FROM practice_papers WHERE id=? AND owner_id=?",
+                        String.valueOf(group.get(i).get("id")), userId);
+            }
+        }
+    }
+
+    private String canonicalQuestionKey(List<String> ids) {
+        if (ids == null || ids.isEmpty()) return "";
+        return ids.stream()
+                .filter(id -> id != null && !id.isBlank())
+                .map(String::trim)
+                .distinct()
+                .sorted()
+                .collect(Collectors.joining(","));
+    }
+
+    private List<String> extractUsedModes(Map<String, Object> row) {
+        Set<String> modes = new LinkedHashSet<>();
+        if (row.get("usedModes") != null) {
+            for (String m : json.readStrings(String.valueOf(row.get("usedModes")))) {
+                ExportMode parsed = tryParseMode(m);
+                if (parsed != null) modes.add(parsed.name());
+            }
+        }
+        if (modes.isEmpty() && row.get("defaultMode") != null) {
+            ExportMode parsed = tryParseMode(String.valueOf(row.get("defaultMode")));
+            if (parsed != null) modes.add(parsed.name());
+        }
+        return new ArrayList<>(modes);
+    }
+
+    private ExportMode parseRequiredMode(String rawMode) {
+        ExportMode parsed = tryParseMode(rawMode);
+        if (parsed == null) {
+            throw ApiException.badRequest("请选择明确的试卷版本（学生做题版、老师做题版或纯答案版）。");
+        }
+        return parsed;
+    }
+
+    private ExportMode tryParseMode(String rawMode) {
+        if (rawMode == null || rawMode.isBlank()) return null;
+        return switch (rawMode.trim().toUpperCase()) {
+            case "QUESTIONS_ONLY", "NO_ANSWERS", "STUDENT" -> ExportMode.QUESTIONS_ONLY;
+            case "ANSWERS_ONLY", "ANSWER_ONLY", "ANSWERS" -> ExportMode.ANSWERS_ONLY;
+            case "WITH_ANSWERS", "TEACHER" -> ExportMode.WITH_ANSWERS;
+            default -> null;
+        };
+    }
+
+    private ExportMode resolveModeValue(String rawMode, ExportMode fallback) {
+        ExportMode parsed = tryParseMode(rawMode);
+        if (parsed != null) return parsed;
+        return fallback == null ? ExportMode.QUESTIONS_ONLY : fallback;
+    }
+
     private ExportMode resolveExportMode(PaperCommand command) {
         if (command != null && command.mode() != null && !command.mode().isBlank()) {
-            return switch (command.mode().trim().toUpperCase()) {
-                case "QUESTIONS_ONLY", "NO_ANSWERS", "STUDENT" -> ExportMode.QUESTIONS_ONLY;
-                case "ANSWERS_ONLY", "ANSWER_ONLY", "ANSWERS" -> ExportMode.ANSWERS_ONLY;
-                default -> ExportMode.WITH_ANSWERS;
-            };
+            return resolveModeValue(command.mode(), ExportMode.WITH_ANSWERS);
         }
         if (command != null && Boolean.FALSE.equals(command.includeAnswers())) {
             return ExportMode.QUESTIONS_ONLY;
@@ -383,10 +522,10 @@ public class PracticePaperService {
 
         if (mode == ExportMode.ANSWERS_ONLY) {
             body.append(paragraph(title + "（参考答案与解析）", 34, true, "center", 100));
-            body.append(paragraph("日期：" + LocalDate.now() + "    共 " + items.size() + " 题    纯答案省纸版", 20, false, "center", 200));
+            body.append(paragraph("日期：" + LocalDate.now() + "    共 " + items.size() + " 题    纯答案版", 20, false, "center", 200));
             appendAnswerKey(body, items, true);
         } else {
-            String headerSuffix = mode == ExportMode.QUESTIONS_ONLY ? "" : "（含答案版）";
+            String headerSuffix = mode == ExportMode.QUESTIONS_ONLY ? "" : "（老师做题版）";
             body.append(paragraph(title + headerSuffix, 36, true, "center", 120));
             body.append(paragraph("日期：" + LocalDate.now() + "    共 " + items.size() + " 题    姓名：____________    得分：________", 20, false, "center", 260));
 
@@ -521,9 +660,9 @@ public class PracticePaperService {
     }
 
     private enum ExportMode {
-        QUESTIONS_ONLY("无答案学生卷"),
-        WITH_ANSWERS("含答案教师版"),
-        ANSWERS_ONLY("纯答案省纸版");
+        QUESTIONS_ONLY("学生做题版"),
+        WITH_ANSWERS("老师做题版"),
+        ANSWERS_ONLY("纯答案版");
 
         final String fileSuffix;
 
@@ -537,11 +676,11 @@ public class PracticePaperService {
     private record PaperItem(List<String> lines, boolean hasOptions, String answer, String explanation,
                              String correction, String errorReason, String questionType, String chapterName) {}
 
-    public record SavePaperCommand(String title, List<String> questionIds) {}
+    public record SavePaperCommand(String title, List<String> questionIds, String mode) {}
 
     public record RenamePaperCommand(String title) {}
 
-    public record ExportPaperCommand(String mode) {}
+    public record ExportPaperCommand(String mode, String customTitle) {}
 
     public record PaperCommand(String title, List<String> questionIds, String chapterId,
                                String errorReason, Integer limit, Boolean includeAnswers, String mode) {}
