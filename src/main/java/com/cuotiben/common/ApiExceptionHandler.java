@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.time.LocalDateTime;
 import java.util.Map;
@@ -15,6 +16,17 @@ import java.util.Map;
 @RestControllerAdvice
 public class ApiExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<Map<String, Object>> handleNotFound(NoResourceFoundException error,
+                                                              HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(Map.of(
+                "code", "NOT_FOUND",
+                "message", "请求的资源不存在。",
+                "path", request.getRequestURI(),
+                "timestamp", LocalDateTime.now().toString()
+        ));
+    }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<Map<String, Object>> handleUploadTooLarge(MaxUploadSizeExceededException error,

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小 E 错题本 · 历史专项网页端</title>
+  <link rel="stylesheet" href="./styles/main.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <a href="#/home" class="brand">
+          <div class="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="32" height="32" rx="10" fill="#0B57D0"/>
+              <path d="M9.5 10.5C9.5 9.67 10.17 9 11 9H21C21.83 9 22.5 9.67 22.5 10.5V21.5C22.5 22.33 21.83 23 21 23H11C10.17 23 9.5 22.33 9.5 21.5V10.5Z" stroke="white" stroke-width="1.8"/>
+              <path d="M13 13.5H19M13 16.5H19M13 19.5H16.5" stroke="white" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <div class="brand-title">小 E 错题本</div>
+            <div class="brand-sub">历史专项 · Web 端</div>
+          </div>
+        </a>
+
+        <button class="btn btn-primary sidebar-cta" id="btn-quick-create" type="button">
+          <span class="btn-icon" data-icon="plus"></span>
+          <span>拍照 / 录入错题</span>
+        </button>
+
+        <nav class="nav-list" id="primary-nav" aria-label="主导航">
+          <a class="nav-item" href="#/home" data-route="home">
+            <span class="nav-icon" data-icon="home"></span>
+            <span>首页概览</span>
+          </a>
+          <a class="nav-item" href="#/questions" data-route="questions">
+            <span class="nav-icon" data-icon="book"></span>
+            <span>历史错题库</span>
+          </a>
+          <a class="nav-item" href="#/practice" data-route="practice">
+            <span class="nav-icon" data-icon="sparkles"></span>
+            <span>智能练习</span>
+          </a>
+          <a class="nav-item" href="#/papers" data-route="papers">
+            <span class="nav-icon" data-icon="fileText"></span>
+            <span>组卷中心</span>
+          </a>
+          <a class="nav-item" href="#/trash" data-route="trash">
+            <span class="nav-icon" data-icon="trash"></span>
+            <span>回收站</span>
+          </a>
+        </nav>
+      </div>
+
+      <div class="sidebar-bottom">
+        <a class="nav-item nav-item-subtle" href="#/feedback" data-route="feedback">
+          <span class="nav-icon" data-icon="message"></span>
+          <span>意见反馈</span>
+        </a>
+        <a class="profile-chip" href="#/profile" id="sidebar-profile" data-route="profile">
+          <div class="avatar-circle" id="sidebar-avatar">学</div>
+          <div class="profile-chip-meta">
+            <div class="profile-chip-name" id="sidebar-nickname">加载中…</div>
+            <div class="profile-chip-sub" id="sidebar-grade">历史专项学习</div>
+          </div>
+          <span class="status-dot" id="backend-status-dot" title="后端连接状态"></span>
+        </a>
+      </div>
+    </aside>
+
+    <div class="main-wrap">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-btn mobile-only" id="btn-menu-toggle" type="button" aria-label="打开导航">
+            <span data-icon="menu"></span>
+          </button>
+          <div>
+            <h1 class="topbar-title" id="page-title">首页概览</h1>
+            <p class="topbar-subtitle" id="page-subtitle">同步后端实时数据，支持与小程序同库演示</p>
+          </div>
+        </div>
+        <div class="topbar-right" id="topbar-actions"></div>
+      </header>
+
+      <main class="page-container" id="view-root">
+        <div class="loading-state">
+          <div class="spinner"></div>
+          <p>正在连接后端并加载数据…</p>
+        </div>
+      </main>
+    </div>
+
+    <nav class="mobile-tabbar" aria-label="移动端导航">
+      <a class="mobile-tab" href="#/home" data-route="home">
+        <span data-icon="home"></span>
+        <span>首页</span>
+      </a>
+      <a class="mobile-tab" href="#/questions" data-route="questions">
+        <span data-icon="book"></span>
+        <span>错题</span>
+      </a>
+      <a class="mobile-tab" href="#/practice" data-route="practice">
+        <span data-icon="sparkles"></span>
+        <span>练习</span>
+      </a>
+      <a class="mobile-tab" href="#/papers" data-route="papers">
+        <span data-icon="fileText"></span>
+        <span>组卷</span>
+      </a>
+      <a class="mobile-tab" href="#/profile" data-route="profile">
+        <span data-icon="user"></span>
+        <span>我的</span>
+      </a>
+    </nav>
+  </div>
+
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+  <div class="toast-container" id="toast-container"></div>
+  <div class="modal-root" id="modal-root"></div>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
